@@ -1,8 +1,8 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
-mem0ai>=2.1.20
+mem0ai==2.0.11
 groq==0.11.0
 httpx==0.27.2
 python-dotenv==1.0.1
-vecs
+psycopg2-binary
 google-genai
