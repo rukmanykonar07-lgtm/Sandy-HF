@@ -43,7 +43,25 @@ def verify_webhook(request: Request):
     token = request.query_params.get("hub.verify_token")
     challenge = request.query_params.get("hub.challenge")
 
-    if mode == "subscribe" and token == os.environ.get("WHATSAPP_VERIFY_TOKEN"):
+    expected = os.environ.get("WHATSAPP_VERIFY_TOKEN")
+
+    # TEMPORARY DEBUG LOGGING — remove once verification works.
+    # Space is public, so we deliberately avoid printing the full
+    # secret — just enough (length + first/last char) to spot
+    # whitespace/mismatch issues in the Logs tab.
+    def _peek(s):
+        if not s:
+            return "None"
+        return f"len={len(s)} first={s[0]!r} last={s[-1]!r}"
+
+    log.info(
+        "Webhook verify attempt: received=[%s] expected=[%s] match=%s",
+        _peek(token),
+        _peek(expected),
+        token == expected,
+    )
+
+    if mode == "subscribe" and token == expected:
         return Response(content=challenge, media_type="text/plain")
     return Response(status_code=403)
 
