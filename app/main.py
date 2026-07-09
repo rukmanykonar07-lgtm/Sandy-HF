@@ -5,6 +5,7 @@ from fastapi import FastAPI, Request, Response
 
 from app.memory import get_memory
 from app.llm import call_llm
+from app.whatsapp import send_whatsapp_reply
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("sandy")
@@ -50,10 +51,9 @@ def verify_webhook(request: Request):
 @app.post("/webhook/whatsapp")
 async def incoming_message(request: Request):
     """
-    Real incoming WhatsApp messages land here.
-    NOTE: this is the stub — plug in actual Meta Cloud API send-message
-    logic once you're past initial testing. For now it just proves
-    memory + LLM are wired correctly end to end.
+    Real incoming WhatsApp messages land here. Pulls relevant memory,
+    calls the LLM, saves the exchange, and sends the reply back on
+    WhatsApp via Meta's Cloud API.
     """
     payload = await request.json()
     log.info("Incoming webhook payload: %s", payload)
@@ -90,5 +90,6 @@ async def incoming_message(request: Request):
     )
 
     log.info("Reply for %s: %s", user_id, reply)
-    # TODO: send `reply` back via Meta Cloud API's send-message endpoint
-    return {"status": "processed", "reply": reply}
+
+    sent = send_whatsapp_reply(to=user_id, text=reply)
+    return {"status": "processed" if sent else "processed_send_failed", "reply": reply}
