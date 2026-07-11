@@ -1,6 +1,6 @@
-"""
+﻿"""
 One function to call any of Sandy's LLMs. litellm gives every provider
-the same interface — no hand-written HTTP client per provider.
+the same interface â€” no hand-written HTTP client per provider.
 
 Cap enforcement lives here (checked before every call) so it's
 impossible for a router/orchestrator to accidentally bypass it.
@@ -13,12 +13,12 @@ import config
 
 MODELS = {
     "groq": "groq/llama-3.3-70b-versatile",
-    "gemini": "gemini/gemini-2.5-flash",
+    "gemini": "gemini/gemini-3.5-flash",
     "cerebras": "cerebras/llama-3.3-70b",
 }
 
 # ponytail: call counts kept in the same sandy_config table via a
-# "usage" key, not a new table — one less thing to provision.
+# "usage" key, not a new table â€” one less thing to provision.
 
 
 class CapExceeded(Exception):
