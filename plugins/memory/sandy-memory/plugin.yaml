@@ -1,0 +1,6 @@
+name: sandy-memory
+description: >
+  Wraps Sandy's existing memory.py (mem0ai on Groq + Gemini + Supabase
+  pgvector) as a Hermes memory provider, so Hermes shares the exact same
+  memory store as the FastAPI /chat endpoint instead of Hermes' bundled
+  Mem0 plugin (openai/ollama only).

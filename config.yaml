@@ -1,0 +1,15 @@
+memory:
+  provider: sandy-memory
+
+providers:
+  groq:
+    name: groq
+    base_url: https://api.groq.com/openai/v1
+    key_env: GROQ_API_KEY
+  cerebras:
+    name: cerebras
+    base_url: https://api.cerebras.ai/v1
+    key_env: CEREBRAS_API_KEY
+
+cron:
+  output_dir: /root/.hermes/cron/output
