@@ -102,7 +102,7 @@ def _handle_chat(req: ChatRequest) -> ChatResponse:
             config.set_config("caps", current)
         else:
             config.set_config(cfg_change["key"], cfg_change["value"])
-        reply = f"Done — updated {cfg_change['key']} to {cfg_change['value']}."
+        reply = f"Done, Ruk — updated {cfg_change['key']} to {cfg_change['value']}. 🎯"
         memory.remember(reply, role="assistant")
         return ChatResponse(reply=reply)
 
@@ -111,12 +111,13 @@ def _handle_chat(req: ChatRequest) -> ChatResponse:
         # when the (approved) resend actually goes through. Saving here
         # too would double up every risky message in memory.
         return ChatResponse(
-            reply=f"This looks risky: \"{req.message}\". Confirm to proceed?",
+            reply=f"Ruk, ye thoda risky lag raha hai: \"{req.message}\" — confirm karoge to karti hoon.",
             needs_approval=True,
         )
 
     memory.remember(req.message, role="user")
-    context = "\n".join(memory.recall(req.message))
+    recalled = memory.recall(req.message)
+    context = ("Things you remember about Ruk:\n" + "\n".join(recalled)) if recalled else ""
     reply = brain.answer(req.message, context=context, override=req.override_llms)
     memory.remember(reply, role="assistant")
     return ChatResponse(reply=reply)
