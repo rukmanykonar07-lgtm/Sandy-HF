@@ -12,6 +12,9 @@ here as `override`, which always wins over auto-classification.
 import json
 
 from llm import call_llm, CapExceeded
+from identity import SANDY_SYSTEM_PROMPT
+
+_IDENTITY_MSG = {"role": "system", "content": SANDY_SYSTEM_PROMPT}
 
 TIERS = {
     "simple": ["groq"],
@@ -39,11 +42,11 @@ def _judge(task: str, answers: dict[str, str]) -> str:
         "Write the single best final answer, merging the strongest parts. "
         "Output only the final answer, no commentary."
     )
-    return call_llm("gemini", [{"role": "user", "content": prompt}])
+    return call_llm("gemini", [_IDENTITY_MSG, {"role": "user", "content": prompt}])
 
 
 def _run_tier(task: str, providers: list[str], context: str) -> str:
-    messages = [{"role": "user", "content": f"{context}\n\nTask: {task}" if context else task}]
+    messages = [_IDENTITY_MSG, {"role": "user", "content": f"{context}\n\nTask: {task}" if context else task}]
     answers = {}
     for p in providers:
         try:
@@ -78,9 +81,9 @@ def _orchestrate(task: str, context: str) -> str:
     for i, sub in enumerate(subtasks):
         worker = workers[i % len(workers)]
         try:
-            results.append(call_llm(worker, [{"role": "user", "content": sub}]))
+            results.append(call_llm(worker, [_IDENTITY_MSG, {"role": "user", "content": sub}]))
         except CapExceeded:
-            results.append(call_llm(orchestrator, [{"role": "user", "content": sub}]))
+            results.append(call_llm(orchestrator, [_IDENTITY_MSG, {"role": "user", "content": sub}]))
 
     for _round in range(MAX_ORCHESTRATOR_ROUNDS):
         synth_prompt = (
@@ -98,7 +101,7 @@ def _orchestrate(task: str, context: str) -> str:
             return verdict_raw
         if verdict.get("done"):
             return verdict.get("answer") or results[-1]  # malformed but done -> best-effort fallback
-        gap_answer = call_llm(orchestrator, [{"role": "user", "content": verdict.get("missing", task)}])
+        gap_answer = call_llm(orchestrator, [_IDENTITY_MSG, {"role": "user", "content": verdict.get("missing", task)}])
         results.append(gap_answer)
 
     return results[-1]  # ran out of rounds -> best-effort last result
