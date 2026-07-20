@@ -56,6 +56,23 @@ def call_llm(provider: str, messages: list[dict], **kwargs) -> str:
     return response.choices[0].message.content
 
 
+def call_llm_with_fallback(provider: str, messages: list[dict], **kwargs) -> str:
+    """Same as call_llm, but if `provider` is capped OR its API call fails
+    for any reason (outage, rate limit, timeout), tries the other
+    providers in turn instead of failing the whole request. Use this for
+    single-provider call sites (_judge, orchestrator) that have no other
+    provider to fall back on already — _run_tier's multi-provider loop
+    doesn't need this, it already gathers from several providers."""
+    order = [provider] + [p for p in MODELS if p != provider]
+    last_err = None
+    for p in order:
+        try:
+            return call_llm(p, messages, **kwargs)
+        except Exception as e:
+            last_err = e
+    raise last_err
+
+
 if __name__ == "__main__":
     # ponytail self-check: real call to Groq (fastest/free), confirms
     # the model string + key actually work end to end.
