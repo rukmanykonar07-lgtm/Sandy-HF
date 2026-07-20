@@ -11,7 +11,7 @@ here as `override`, which always wins over auto-classification.
 """
 import json
 
-from llm import call_llm, CapExceeded
+from llm import call_llm, call_llm_with_fallback, CapExceeded
 from identity import SANDY_SYSTEM_PROMPT
 
 _IDENTITY_MSG = {"role": "system", "content": SANDY_SYSTEM_PROMPT}
@@ -42,7 +42,7 @@ def _judge(task: str, answers: dict[str, str]) -> str:
         "Write the single best final answer, merging the strongest parts. "
         "Output only the final answer, no commentary."
     )
-    return call_llm("gemini", [_IDENTITY_MSG, {"role": "user", "content": prompt}])
+    return call_llm_with_fallback("gemini", [_IDENTITY_MSG, {"role": "user", "content": prompt}])
 
 
 def _run_tier(task: str, providers: list[str], context: str) -> str:
@@ -69,7 +69,7 @@ def _orchestrate(task: str, context: str) -> str:
         "Break this into 2-4 concrete sub-tasks that, done well, complete the task. "
         'Return JSON only: {"subtasks": ["...", "..."]}'
     )
-    plan_raw = call_llm(orchestrator, [{"role": "user", "content": plan_prompt}])
+    plan_raw = call_llm_with_fallback(orchestrator, [{"role": "user", "content": plan_prompt}])
     try:
         subtasks = json.loads(plan_raw)["subtasks"]
         if not isinstance(subtasks, list) or not subtasks:
@@ -83,7 +83,7 @@ def _orchestrate(task: str, context: str) -> str:
         try:
             results.append(call_llm(worker, [_IDENTITY_MSG, {"role": "user", "content": sub}]))
         except CapExceeded:
-            results.append(call_llm(orchestrator, [_IDENTITY_MSG, {"role": "user", "content": sub}]))
+            results.append(call_llm_with_fallback(orchestrator, [_IDENTITY_MSG, {"role": "user", "content": sub}]))
 
     for _round in range(MAX_ORCHESTRATOR_ROUNDS):
         synth_prompt = (
@@ -92,7 +92,7 @@ def _orchestrate(task: str, context: str) -> str:
             + "\n\nIs this enough to fully answer the original task? "
             'Reply JSON: {"done": true, "answer": "..."} or {"done": false, "missing": "..."}'
         )
-        verdict_raw = call_llm(orchestrator, [{"role": "user", "content": synth_prompt}])
+        verdict_raw = call_llm_with_fallback(orchestrator, [{"role": "user", "content": synth_prompt}])
         try:
             verdict = json.loads(verdict_raw)
         except json.JSONDecodeError:
@@ -101,7 +101,7 @@ def _orchestrate(task: str, context: str) -> str:
             return verdict_raw
         if verdict.get("done"):
             return verdict.get("answer") or results[-1]  # malformed but done -> best-effort fallback
-        gap_answer = call_llm(orchestrator, [_IDENTITY_MSG, {"role": "user", "content": verdict.get("missing", task)}])
+        gap_answer = call_llm_with_fallback(orchestrator, [_IDENTITY_MSG, {"role": "user", "content": verdict.get("missing", task)}])
         results.append(gap_answer)
 
     return results[-1]  # ran out of rounds -> best-effort last result
