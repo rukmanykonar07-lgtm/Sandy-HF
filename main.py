@@ -17,6 +17,8 @@ from pydantic import BaseModel
 import config
 import memory
 import brain
+import mastery
+import selfmod
 from llm import call_llm, CapExceeded
 
 app = FastAPI()
@@ -103,6 +105,79 @@ def _handle_chat(req: ChatRequest) -> ChatResponse:
         else:
             config.set_config(cfg_change["key"], cfg_change["value"])
         reply = f"Done, Ruk — updated {cfg_change['key']} to {cfg_change['value']}. 🎯"
+        memory.remember(reply, role="assistant")
+        return ChatResponse(reply=reply)
+
+    # If Ruk already has a pending self-edit proposal for this session and
+    # just approved it, apply it directly -- don't re-classify the text,
+    # since re-running the LLM could in principle produce a different
+    # proposal than what was actually shown and approved.
+    if req.approved and req.session_id in selfmod._pending:
+        memory.remember(req.message, role="user")
+        try:
+            reply = selfmod.apply_pending(req.session_id)
+        except selfmod.GitOpError as e:
+            reply = f"Ruk, edit push nahi ho paya: {e}"
+        memory.remember(reply, role="assistant")
+        return ChatResponse(reply=reply)
+
+    selfmod_req = selfmod.extract_selfmod_request(req.message)
+    if selfmod_req:
+        action = selfmod_req["action"]
+
+        if action == "history":
+            try:
+                reply = selfmod.recent_history()
+            except selfmod.GitOpError as e:
+                reply = f"Ruk, history nahi mil payi: {e}"
+            return ChatResponse(reply=reply)
+
+        if action == "edit":
+            try:
+                reply = selfmod.propose_edit(
+                    req.session_id, selfmod_req["file_path"], selfmod_req["instruction"]
+                )
+            except selfmod.GitOpError as e:
+                reply = f"Ruk, proposal nahi bana paayi: {e}"
+                return ChatResponse(reply=reply)
+            needs_approval = req.session_id in selfmod._pending
+            return ChatResponse(reply=reply, needs_approval=needs_approval)
+
+        if action == "rollback":
+            if not req.approved:
+                return ChatResponse(
+                    reply=(
+                        f"Ruk, confirm karo — commit {selfmod_req['commit_hash']} "
+                        "revert karke push kar du?"
+                    ),
+                    needs_approval=True,
+                )
+            memory.remember(req.message, role="user")
+            try:
+                reply = selfmod.rollback_to(selfmod_req["commit_hash"])
+            except selfmod.GitOpError as e:
+                reply = f"Ruk, rollback nahi ho paaya: {e}"
+            memory.remember(reply, role="assistant")
+            return ChatResponse(reply=reply)
+
+    mastery_req = mastery.extract_mastery_request(req.message)
+    if mastery_req:
+        # Kicking off a multi-day autonomous job spends real API credits
+        # over days unattended -- always confirm first, same as risky
+        # tasks, regardless of what the generic risk-classifier thinks.
+        if not req.approved:
+            return ChatResponse(
+                reply=(
+                    f"Ruk, confirm kar do — \"{mastery_req['skill']}\" mein master "
+                    f"banne ka mission, {mastery_req['days']} din, roz "
+                    f"~{mastery_req['hours_per_day']}h — shuru karu?"
+                ),
+                needs_approval=True,
+            )
+        memory.remember(req.message, role="user")
+        reply = mastery.start_mastery(
+            mastery_req["skill"], mastery_req["days"], mastery_req["hours_per_day"]
+        )
         memory.remember(reply, role="assistant")
         return ChatResponse(reply=reply)
 
