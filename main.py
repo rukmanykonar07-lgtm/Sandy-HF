@@ -52,8 +52,12 @@ def _is_config_change(message: str) -> dict | None:
     """Cheap check: does this message ask to change a cap/preference?
     Returns the parsed {key, value} or None if it's a normal task."""
     prompt = (
-        "Does this message ask to change an LLM credit cap or a Sandy "
-        "preference/setting (not a normal task)? "
+        "Does this message ask to change ONLY an LLM credit cap or a "
+        "structured Sandy setting (caps, approval_required_for, "
+        "always_ask_approval)? This does NOT include requests to edit "
+        "Sandy's own code/files, her identity/personality, or how she "
+        "talks/behaves -- those are handled elsewhere, always answer "
+        "false for those, even if they sound like a 'preference'. "
         f'Message: "{message}"\n'
         'If yes, reply JSON: {"is_config": true, "key": "...", "value": ...} '
         '(key is one of: caps, approval_required_for, always_ask_approval; '
