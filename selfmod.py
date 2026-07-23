@@ -6,7 +6,6 @@ starts from Ruk explicitly asking for a specific change.
 Also gives Ruk /chat visibility into edit history and rollback (git log
 / git revert), so a bad push can be undone from chat, not just by hand.
 """
-import base64
 import difflib
 import json
 import os
@@ -51,16 +50,24 @@ def _run_git(*args: str) -> str:
         env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
     )
     if result.returncode != 0:
-        raise GitOpError(result.stderr.strip() or f"git {args[0]} failed")
+        err = result.stderr.strip() or f"git {args[0]} failed"
+        token = os.environ.get("HF_WRITE_TOKEN")
+        if token:
+            err = err.replace(token, "***")
+        raise GitOpError(err)
     return result.stdout.strip()
 
 
-def _auth_header() -> str:
+def _push_url() -> str:
+    """Standard HF-documented pattern for scripted git pushes: token
+    embedded in the URL. Switched to this from a header-based approach
+    that wasn't authenticating correctly against HF's git backend --
+    _run_git() above scrubs the token from any error text regardless, so
+    this doesn't reopen the original leak concern."""
     token = os.environ.get("HF_WRITE_TOKEN")
     if not token:
         raise GitOpError("HF_WRITE_TOKEN not set -- can't push")
-    basic = base64.b64encode(f"user:{token}".encode()).decode()
-    return f"AUTHORIZATION: basic {basic}"
+    return f"https://user:{token}@huggingface.co/spaces/Rukmany/RuksHome"
 
 
 def _assert_up_to_date() -> None:
@@ -150,7 +157,7 @@ def apply_pending(session_id: str) -> str:
     _run_git("add", pending["file_path"])
     _run_git("-c", "user.email=sandy@ruks-home.local", "-c", "user.name=Sandy",
               "commit", "-m", pending["commit_message"])
-    _run_git("-c", f"http.extraheader={_auth_header()}", "push", "origin", "main")
+    _run_git("push", _push_url(), "main")
     return f"Done, Ruk — {pending['file_path']} push ho gaya, HF rebuild ho raha hai ab."
 
 
@@ -179,5 +186,5 @@ def rollback_to(commit_hash: str) -> str:
             "commits usी jagah ko phir se change kar chuke hain, conflict "
             "aa raha hai. Manually resolve karna padegा, auto-revert safe nahi hai yahan."
         )
-    _run_git("-c", f"http.extraheader={_auth_header()}", "push", "origin", "main")
+    _run_git("push", _push_url(), "main")
     return f"Done, Ruk — {commit_hash} revert ho gaya, redeploy ho raha hai."
