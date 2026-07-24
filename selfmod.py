@@ -58,12 +58,11 @@ def _run_git(*args: str) -> str:
     return result.stdout.strip()
 
 
-def _push_url() -> str:
-    """Standard HF-documented pattern for scripted git pushes: token
-    embedded in the URL. Switched to this from a header-based approach
-    that wasn't authenticating correctly against HF's git backend --
-    _run_git() above scrubs the token from any error text regardless, so
-    this doesn't reopen the original leak concern."""
+def _auth_url() -> str:
+    """Standard HF-documented pattern for scripted git access: token
+    embedded in the URL. Used for both fetch and push -- _run_git()
+    above scrubs the token from any error text regardless, so this
+    doesn't reopen the original leak concern."""
     token = os.environ.get("HF_WRITE_TOKEN")
     if not token:
         raise GitOpError("HF_WRITE_TOKEN not set -- can't push")
@@ -73,9 +72,14 @@ def _push_url() -> str:
 def _assert_up_to_date() -> None:
     """Refuse to edit/push on a stale checkout -- if origin has moved
     since this container was built (e.g. you pushed something by hand),
-    don't risk a confusing push. Tell Ruk to redeploy first instead."""
-    _run_git("fetch", "origin", "main")
-    if _run_git("rev-parse", "HEAD") != _run_git("rev-parse", "origin/main"):
+    don't risk a confusing push. Tell Ruk to redeploy first instead.
+
+    Fetches via the authenticated URL (not the plain 'origin' remote,
+    which has no credentials in the container) -- fetching by explicit
+    URL doesn't update the origin/main tracking ref, so FETCH_HEAD is
+    what actually holds the result here."""
+    _run_git("fetch", _auth_url(), "main")
+    if _run_git("rev-parse", "HEAD") != _run_git("rev-parse", "FETCH_HEAD"):
         raise GitOpError(
             "Ruk, is container ka code origin/main se peeche hai (shayad "
             "kahin aur se push hua hai). Pehle Space ko restart/redeploy "
@@ -157,7 +161,7 @@ def apply_pending(session_id: str) -> str:
     _run_git("add", pending["file_path"])
     _run_git("-c", "user.email=sandy@ruks-home.local", "-c", "user.name=Sandy",
               "commit", "-m", pending["commit_message"])
-    _run_git("push", _push_url(), "main")
+    _run_git("push", _auth_url(), "main")
     return f"Done, Ruk — {pending['file_path']} push ho gaya, HF rebuild ho raha hai ab."
 
 
@@ -186,5 +190,5 @@ def rollback_to(commit_hash: str) -> str:
             "commits usी jagah ko phir se change kar chuke hain, conflict "
             "aa raha hai. Manually resolve karna padegा, auto-revert safe nahi hai yahan."
         )
-    _run_git("push", _push_url(), "main")
+    _run_git("push", _auth_url(), "main")
     return f"Done, Ruk — {commit_hash} revert ho gaya, redeploy ho raha hai."
