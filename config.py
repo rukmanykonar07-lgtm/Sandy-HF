@@ -24,7 +24,11 @@ def _db() -> Client:
     global _client
     if _client is None:
         url = os.environ["SUPABASE_URL"]
-        key = os.environ["SUPABASE_KEY"]
+        # Backend writes should bypass RLS (it's meant to restrict
+        # untrusted client access, not trusted server code) -- use the
+        # service_role key if it's set, fall back to the old anon key
+        # otherwise so this doesn't break before the new secret exists.
+        key = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ["SUPABASE_KEY"]
         _client = create_client(url, key)
     return _client
 
