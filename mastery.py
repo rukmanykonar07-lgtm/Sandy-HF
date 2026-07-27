@@ -43,7 +43,15 @@ def extract_mastery_request(message: str) -> dict | None:
         data = json.loads(raw)
     except (json.JSONDecodeError, TypeError, ValueError):
         return None
-    return data if data.get("is_mastery_request") else None
+    # Same fail-safe pattern as selfmod.extract_selfmod_request(): main.py
+    # reads data["skill"]/["days"]/["hours_per_day"] unguarded, so a
+    # malformed dict missing any of these would crash the same way the
+    # selfmod KeyError did.
+    if not isinstance(data, dict) or not data.get("is_mastery_request"):
+        return None
+    if not all(k in data for k in ("skill", "days", "hours_per_day")):
+        return None
+    return data
 
 
 def start_mastery(skill: str, days: int, hours_per_day: int) -> str:
