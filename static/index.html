@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Ruk's Home</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#0B0B14">
+<link rel="icon" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0B0B14;
+    --bg-raised: #14141F;
+    --sandy-1: #FF6B5B;
+    --sandy-2: #FF3D81;
+    --ruk: #4FE3C1;
+    --text: #F2F0FA;
+    --text-dim: #8C8AA0;
+    --border: #23222E;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+    overscroll-behavior: none;
+  }
+
+  #app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    height: 100dvh;
+    max-width: 640px;
+    margin: 0 auto;
+  }
+
+  /* ---------- Header / Orb ---------- */
+
+  header {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 28px 16px 18px;
+    gap: 10px;
+  }
+
+  h1 {
+    font-family: 'Space Grotesk', sans-serif;
+    font-weight: 700;
+    font-size: 20px;
+    letter-spacing: 0.01em;
+    margin: 0;
+    color: var(--text);
+  }
+
+  #orb-wrap {
+    width: 96px;
+    height: 96px;
+    position: relative;
+  }
+
+  #orb {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: radial-gradient(circle at 34% 30%, var(--sandy-1), var(--sandy-2) 70%);
+    box-shadow: 0 0 40px -4px rgba(255, 61, 129, 0.55);
+    animation: breathe 4.2s ease-in-out infinite;
+    transform-origin: center;
+  }
+
+  #orb.thinking {
+    animation: pulse-thinking 0.9s ease-in-out infinite;
+  }
+
+  #orb.speaking {
+    animation: pulse-speaking 0.45s ease-in-out infinite;
+  }
+
+  @keyframes breathe {
+    0%, 100% { transform: scale(0.94); box-shadow: 0 0 32px -6px rgba(255, 61, 129, 0.45); }
+    50%      { transform: scale(1.02); box-shadow: 0 0 46px -4px rgba(255, 61, 129, 0.6); }
+  }
+
+  @keyframes pulse-thinking {
+    0%, 100% { transform: scale(0.9); }
+    50%      { transform: scale(1.05); }
+  }
+
+  @keyframes pulse-speaking {
+    0%, 100% { transform: scale(0.96) rotate(0deg); }
+    50%      { transform: scale(1.08) rotate(4deg); }
+  }
+
+  #status {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: lowercase;
+    letter-spacing: 0.02em;
+    min-height: 14px;
+  }
+
+  /* ---------- Chat log ---------- */
+
+  #log {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    padding: 8px 16px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .row { display: flex; flex-direction: column; max-width: 82%; }
+  .row.user { align-self: flex-end; align-items: flex-end; }
+  .row.assistant { align-self: flex-start; align-items: flex-start; }
+
+  .bubble {
+    padding: 10px 14px;
+    border-radius: 16px;
+    font-size: 14.5px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .row.user .bubble {
+    background: rgba(79, 227, 193, 0.14);
+    border: 1px solid rgba(79, 227, 193, 0.3);
+    color: var(--text);
+    border-bottom-right-radius: 5px;
+  }
+
+  .row.assistant .bubble {
+    background: linear-gradient(135deg, rgba(255,107,91,0.16), rgba(255,61,129,0.16));
+    border: 1px solid rgba(255, 61, 129, 0.28);
+    color: var(--text);
+    border-bottom-left-radius: 5px;
+  }
+
+  .timestamp {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-top: 4px;
+    padding: 0 4px;
+  }
+
+  .approval-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  .approval-actions button {
+    font-family: 'Inter', sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    border: none;
+    border-radius: 10px;
+    padding: 7px 14px;
+    cursor: pointer;
+  }
+
+  .btn-confirm {
+    background: var(--ruk);
+    color: #06231D;
+  }
+
+  .btn-cancel {
+    background: var(--bg-raised);
+    color: var(--text-dim);
+    border: 1px solid var(--border) !important;
+  }
+
+  /* ---------- Composer ---------- */
+
+  #composer {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 8px;
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border);
+    background: var(--bg);
+  }
+
+  #msg-input {
+    flex: 1;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 14px;
+    padding: 12px 14px;
+    font-size: 15px;
+    font-family: inherit;
+    resize: none;
+    max-height: 120px;
+  }
+
+  #msg-input:focus {
+    outline: 2px solid var(--sandy-2);
+    outline-offset: 1px;
+  }
+
+  #send-btn {
+    background: linear-gradient(135deg, var(--sandy-1), var(--sandy-2));
+    color: #1a0509;
+    border: none;
+    border-radius: 14px;
+    padding: 0 18px;
+    font-weight: 700;
+    font-family: 'Space Grotesk', sans-serif;
+    cursor: pointer;
+    font-size: 14px;
+  }
+
+  #send-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  /* ---------- Token modal ---------- */
+
+  #token-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(11, 11, 20, 0.92);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    z-index: 50;
+  }
+
+  #token-modal.hidden { display: none; }
+
+  #token-card {
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: 24px;
+    max-width: 380px;
+    width: 100%;
+  }
+
+  #token-card h2 {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 17px;
+    margin: 0 0 8px;
+  }
+
+  #token-card p {
+    font-size: 13.5px;
+    color: var(--text-dim);
+    line-height: 1.5;
+    margin: 0 0 16px;
+  }
+
+  #token-input {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    margin-bottom: 12px;
+  }
+
+  #token-save {
+    width: 100%;
+    background: linear-gradient(135deg, var(--sandy-1), var(--sandy-2));
+    color: #1a0509;
+    border: none;
+    border-radius: 10px;
+    padding: 11px;
+    font-weight: 700;
+    font-family: 'Space Grotesk', sans-serif;
+    cursor: pointer;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    #orb, #orb.thinking, #orb.speaking { animation: none; }
+  }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <header>
+    <div id="orb-wrap"><div id="orb"></div></div>
+    <h1>Ruk's Home</h1>
+    <div id="status">idle</div>
+  </header>
+
+  <div id="log"></div>
+
+  <div id="composer">
+    <textarea id="msg-input" rows="1" placeholder="Kya bolna hai, Ruk?"></textarea>
+    <button id="send-btn">Send</button>
+  </div>
+</div>
+
+<div id="token-modal" class="hidden">
+  <div id="token-card">
+    <h2>Connect to Sandy</h2>
+    <p>Ruk's Home talks to your private Space, so it needs your Hugging Face access token once. It's saved only on this device.</p>
+    <input id="token-input" type="password" placeholder="hf_...">
+    <button id="token-save">Save &amp; connect</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  const TOKEN_KEY = "sandy_hf_token";
+  const SESSION_ID = "ruks-home";
+
+  const logEl = document.getElementById("log");
+  const orbEl = document.getElementById("orb");
+  const statusEl = document.getElementById("status");
+  const inputEl = document.getElementById("msg-input");
+  const sendBtn = document.getElementById("send-btn");
+  const tokenModal = document.getElementById("token-modal");
+  const tokenInput = document.getElementById("token-input");
+  const tokenSave = document.getElementById("token-save");
+
+  let pending = null; // { message } — set when the last reply needs_approval
+
+  // ---------- Orb state ----------
+  function setOrbState(state) {
+    orbEl.classList.remove("thinking", "speaking");
+    if (state === "thinking") orbEl.classList.add("thinking");
+    if (state === "speaking") orbEl.classList.add("speaking");
+    statusEl.textContent = state;
+  }
+
+  // ---------- Auth ----------
+  function getToken() {
+    return localStorage.getItem(TOKEN_KEY);
+  }
+
+  function authHeaders() {
+    const t = getToken();
+    return t ? { "Authorization": "Bearer " + t } : {};
+  }
+
+  function ensureToken() {
+    if (!getToken()) {
+      tokenModal.classList.remove("hidden");
+      return false;
+    }
+    return true;
+  }
+
+  tokenSave.addEventListener("click", () => {
+    const val = tokenInput.value.trim();
+    if (!val) return;
+    localStorage.setItem(TOKEN_KEY, val);
+    tokenModal.classList.add("hidden");
+    loadHistory();
+  });
+
+  // ---------- Rendering ----------
+  function fmtTime(iso) {
+    try {
+      const d = iso ? new Date(iso) : new Date();
+      return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function appendMessage(role, text, timestamp, needsApproval) {
+    const row = document.createElement("div");
+    row.className = "row " + (role === "user" ? "user" : "assistant");
+
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.textContent = text;
+    row.appendChild(bubble);
+
+    const ts = document.createElement("div");
+    ts.className = "timestamp";
+    ts.textContent = fmtTime(timestamp);
+    row.appendChild(ts);
+
+    if (needsApproval) {
+      const actions = document.createElement("div");
+      actions.className = "approval-actions";
+
+      const confirmBtn = document.createElement("button");
+      confirmBtn.className = "btn-confirm";
+      confirmBtn.textContent = "Confirm";
+      confirmBtn.addEventListener("click", () => window.sandyConfirmPending());
+
+      const cancelBtn = document.createElement("button");
+      cancelBtn.className = "btn-cancel";
+      cancelBtn.textContent = "Cancel";
+      cancelBtn.addEventListener("click", () => window.sandyCancelPending());
+
+      actions.appendChild(confirmBtn);
+      actions.appendChild(cancelBtn);
+      row.appendChild(actions);
+    }
+
+    logEl.appendChild(row);
+    logEl.scrollTop = logEl.scrollHeight;
+    return row;
+  }
+
+  // ---------- History on load ----------
+  async function loadHistory() {
+    try {
+      const res = await fetch("/history", { headers: authHeaders() });
+      if (!res.ok) return;
+      const data = await res.json();
+      logEl.innerHTML = "";
+      (data.messages || []).forEach((m) => appendMessage(m.role, m.message, m.created_at, false));
+    } catch (e) {
+      // history is a nice-to-have -- a failed load shouldn't block chatting
+      console.warn("could not load history", e);
+    }
+  }
+
+  // ---------- Sending ----------
+  async function sendToSandy(message, approved) {
+    setOrbState("thinking");
+    sendBtn.disabled = true;
+    try {
+      const res = await fetch("/chat", {
+        method: "POST",
+        headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
+        body: JSON.stringify({
+          message: message,
+          session_id: SESSION_ID,
+          approved: !!approved,
+        }),
+      });
+      const data = await res.json();
+
+      setOrbState("speaking");
+      appendMessage("assistant", data.reply, null, !!data.needs_approval);
+
+      if (data.needs_approval) {
+        pending = { message: message };
+      } else {
+        pending = null;
+      }
+
+      setTimeout(() => setOrbState("idle"), 900);
+    } catch (e) {
+      setOrbState("idle");
+      appendMessage("assistant", "Connection issue, Ruk — check the token or your network and try again.", null, false);
+    } finally {
+      sendBtn.disabled = false;
+    }
+  }
+
+  async function handleSend() {
+    const text = inputEl.value.trim();
+    if (!text) return;
+    if (!ensureToken()) return;
+    inputEl.value = "";
+    inputEl.style.height = "auto";
+    appendMessage("user", text, null, false);
+    await sendToSandy(text, false);
+  }
+
+  // Exposed globally so a future voice layer (or any future UI) can
+  // trigger the exact same confirm/cancel path as the buttons.
+  window.sandyConfirmPending = async function () {
+    if (!pending) return;
+    const msg = pending.message;
+    pending = null;
+    await sendToSandy(msg, true);
+  };
+
+  window.sandyCancelPending = function () {
+    pending = null;
+    appendMessage("assistant", "Theek hai, cancel kar diya.", null, false);
+  };
+
+  sendBtn.addEventListener("click", handleSend);
+  inputEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  });
+  inputEl.addEventListener("input", () => {
+    inputEl.style.height = "auto";
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + "px";
+  });
+
+  // ---------- Boot ----------
+  if (ensureToken()) {
+    loadHistory();
+  }
+
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/service-worker.js").catch(() => {});
+  }
+})();
+</script>
+</body>
+</html>
