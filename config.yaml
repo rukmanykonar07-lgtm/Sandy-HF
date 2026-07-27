@@ -10,6 +10,10 @@ providers:
     name: cerebras
     base_url: https://api.cerebras.ai/v1
     key_env: CEREBRAS_API_KEY
+  gemini:
+    name: gemini
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    key_env: GOOGLE_API_KEY
 
 cron:
   output_dir: /root/.hermes/cron/output

@@ -12,16 +12,27 @@ import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import chatlog
 import config
 import memory
 import brain
 import mastery
 import selfmod
-from llm import call_llm, CapExceeded
+from llm import call_llm, CapExceeded, MODELS
 
 app = FastAPI()
+
+
+def _remember(text: str, role: str) -> None:
+    """Every message goes through here instead of calling memory.remember()
+    directly -- saves the extracted-facts memory (Mem0) AND the verbatim
+    chat_log (for Ruk's Home's history-on-refresh), always together."""
+    memory.remember(text, role=role)
+    chatlog.log(text, role=role)
 
 app.add_middleware(
     CORSMiddleware,
@@ -76,6 +87,40 @@ def _is_config_change(message: str) -> dict | None:
     return parsed
 
 
+def _extract_llm_override(message: str) -> list[str] | None:
+    """Does this message explicitly tell Sandy WHICH model(s) to use for
+    the task (not what the task itself is)? Returns a provider list for
+    brain.answer()'s `override`, or None to let auto-classification run
+    as usual. Provider names come from llm.MODELS, so adding a new
+    provider there (e.g. claude, kimi) is picked up here automatically."""
+    providers = list(MODELS)
+    prompt = (
+        "Does this message explicitly tell Sandy which LLM/model to use "
+        f"for this task? Valid providers: {', '.join(providers)}, or the "
+        "word 'orchestrator' for full multi-round mode. This is about "
+        "WHICH MODEL to use, not what the task is -- if the message is "
+        "just a normal task/question with no model mentioned, answer no.\n"
+        f'Message: "{message}"\n'
+        'If yes, reply JSON only: {"override": ["provider_name"]} '
+        '(or {"override": ["orchestrator"]}). '
+        'If no, reply exactly: {"override": null}'
+    )
+    raw = call_llm("groq", [{"role": "user", "content": prompt}])
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    override = parsed.get("override")
+    if not isinstance(override, list) or not override:
+        return None
+    valid = set(providers) | {"orchestrator"}
+    if not all(p in valid for p in override):
+        return None  # malformed/hallucinated provider name -> fail safe
+    return override
+
+
 def _needs_approval(message: str) -> bool:
     cfg = config.get_all_config()
     if cfg.get("always_ask_approval"):
@@ -101,7 +146,7 @@ def chat(req: ChatRequest) -> ChatResponse:
 def _handle_chat(req: ChatRequest) -> ChatResponse:
     cfg_change = _is_config_change(req.message)
     if cfg_change:
-        memory.remember(req.message, role="user")
+        _remember(req.message, role="user")
         if cfg_change["key"] == "caps":
             current = config.get_config("caps") or {}
             current.update(cfg_change["value"])
@@ -109,7 +154,7 @@ def _handle_chat(req: ChatRequest) -> ChatResponse:
         else:
             config.set_config(cfg_change["key"], cfg_change["value"])
         reply = f"Done, Ruk — updated {cfg_change['key']} to {cfg_change['value']}. 🎯"
-        memory.remember(reply, role="assistant")
+        _remember(reply, role="assistant")
         return ChatResponse(reply=reply)
 
     # If Ruk already has a pending self-edit proposal for this session and
@@ -117,12 +162,12 @@ def _handle_chat(req: ChatRequest) -> ChatResponse:
     # since re-running the LLM could in principle produce a different
     # proposal than what was actually shown and approved.
     if req.approved and req.session_id in selfmod._pending:
-        memory.remember(req.message, role="user")
+        _remember(req.message, role="user")
         try:
             reply = selfmod.apply_pending(req.session_id)
         except selfmod.GitOpError as e:
             reply = f"Ruk, edit push nahi ho paya: {e}"
-        memory.remember(reply, role="assistant")
+        _remember(reply, role="assistant")
         return ChatResponse(reply=reply)
 
     selfmod_req = selfmod.extract_selfmod_request(req.message)
@@ -156,12 +201,12 @@ def _handle_chat(req: ChatRequest) -> ChatResponse:
                     ),
                     needs_approval=True,
                 )
-            memory.remember(req.message, role="user")
+            _remember(req.message, role="user")
             try:
                 reply = selfmod.rollback_to(selfmod_req["commit_hash"])
             except selfmod.GitOpError as e:
                 reply = f"Ruk, rollback nahi ho paaya: {e}"
-            memory.remember(reply, role="assistant")
+            _remember(reply, role="assistant")
             return ChatResponse(reply=reply)
 
     mastery_req = mastery.extract_mastery_request(req.message)
@@ -178,11 +223,11 @@ def _handle_chat(req: ChatRequest) -> ChatResponse:
                 ),
                 needs_approval=True,
             )
-        memory.remember(req.message, role="user")
+        _remember(req.message, role="user")
         reply = mastery.start_mastery(
             mastery_req["skill"], mastery_req["days"], mastery_req["hours_per_day"]
         )
-        memory.remember(reply, role="assistant")
+        _remember(reply, role="assistant")
         return ChatResponse(reply=reply)
 
     if _needs_approval(req.message) and not req.approved:
@@ -194,17 +239,44 @@ def _handle_chat(req: ChatRequest) -> ChatResponse:
             needs_approval=True,
         )
 
-    memory.remember(req.message, role="user")
+    _remember(req.message, role="user")
     recalled = memory.recall(req.message)
     context = ("Things you remember about Ruk:\n" + "\n".join(recalled)) if recalled else ""
-    reply = brain.answer(req.message, context=context, override=req.override_llms)
-    memory.remember(reply, role="assistant")
+    override = req.override_llms or _extract_llm_override(req.message)
+    reply = brain.answer(req.message, context=context, override=override)
+    _remember(reply, role="assistant")
     return ChatResponse(reply=reply)
 
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/history")
+def history(limit: int = 200):
+    return {"messages": chatlog.get_history(limit=limit)}
+
+
+# Ruk's Home -- served as a plain static PWA from this same backend, no
+# separate hosting/build step. service-worker.js and manifest.json are
+# served from root (not /static) so the PWA's scope covers the whole app.
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+@app.get("/")
+def ruks_home():
+    return FileResponse("static/index.html")
+
+
+@app.get("/manifest.json")
+def manifest_json():
+    return FileResponse("static/manifest.json", media_type="application/manifest+json")
+
+
+@app.get("/service-worker.js")
+def service_worker():
+    return FileResponse("static/service-worker.js", media_type="application/javascript")
 
 
 if __name__ == "__main__":
