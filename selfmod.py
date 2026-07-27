@@ -107,7 +107,13 @@ def extract_selfmod_request(message: str) -> dict | None:
         data = json.loads(raw)
     except (json.JSONDecodeError, TypeError, ValueError):
         return None
-    return None if data.get("action") == "none" else data
+    # Guard against malformed/off-schema LLM output (e.g. a dict missing
+    # "action", or valid JSON that isn't a dict at all) -- fail safe to
+    # "not a self-mod request" instead of returning a truthy value that
+    # crashes main.py's unguarded selfmod_req["action"] lookup.
+    if not isinstance(data, dict) or data.get("action") in (None, "none"):
+        return None
+    return data
 
 
 def propose_edit(session_id: str, file_path: str, instruction: str) -> str:
