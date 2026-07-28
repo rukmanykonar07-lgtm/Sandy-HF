@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import chatlog
+import codebase
 import config
 import memory
 import brain
@@ -122,6 +123,21 @@ def _extract_llm_override(message: str) -> list[str] | None:
     if not all(p in valid for p in override):
         return None  # malformed/hallucinated provider name -> fail safe
     return override
+
+
+def _is_codebase_analysis_request(message: str) -> bool:
+    """Does this message ask Sandy to look at / review / scan / analyze
+    her own actual code (read-only understanding) -- NOT asking her to
+    change/fix/edit anything, that's selfmod's job."""
+    prompt = (
+        "Does this message ask Sandy to look at, review, scan, or analyze "
+        "her own codebase/code/files in a read-only way (NOT asking her to "
+        "change, edit, or fix anything -- edits are handled elsewhere)? "
+        "Answer with exactly one word: yes or no.\n"
+        f'Message: "{message}"'
+    )
+    result = call_llm("groq", [{"role": "user", "content": prompt}]).strip().lower()
+    return result.startswith("yes")
 
 
 def _needs_approval(message: str) -> bool:
@@ -238,6 +254,12 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
         reply = mastery.start_mastery(
             mastery_req["skill"], mastery_req["days"], mastery_req["hours_per_day"]
         )
+        _remember(background_tasks, reply, role="assistant")
+        return ChatResponse(reply=reply)
+
+    if _is_codebase_analysis_request(req.message):
+        _remember(background_tasks, req.message, role="user")
+        reply = codebase.analyze(req.message)
         _remember(background_tasks, reply, role="assistant")
         return ChatResponse(reply=reply)
 
