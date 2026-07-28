@@ -48,13 +48,21 @@ def _judge(task: str, answers: dict[str, str]) -> str:
 def _run_tier(task: str, providers: list[str], context: str) -> str:
     messages = [_IDENTITY_MSG, {"role": "user", "content": f"{context}\n\nTask: {task}" if context else task}]
     answers = {}
+    last_error = None
     for p in providers:
         try:
             answers[p] = call_llm(p, messages)
         except CapExceeded:
             continue  # ponytail: skip a capped provider, don't fail the whole task
+        except Exception as e:
+            # ponytail: a single broken/misconfigured provider (bad model
+            # name, outage, whatever) shouldn't sink the whole task if the
+            # others in this tier can still answer -- skip it, keep going.
+            print(f"[brain._run_tier] provider '{p}' failed, skipping: {e!r}")
+            last_error = e
+            continue
     if not answers:
-        raise CapExceeded("all providers for this tier are capped")
+        raise CapExceeded(str(last_error) if last_error else "all providers for this tier are capped")
     if len(answers) == 1:
         return next(iter(answers.values()))
     return _judge(task, answers)
@@ -83,6 +91,9 @@ def _orchestrate(task: str, context: str) -> str:
         try:
             results.append(call_llm(worker, [_IDENTITY_MSG, {"role": "user", "content": sub}]))
         except CapExceeded:
+            results.append(call_llm_with_fallback(orchestrator, [_IDENTITY_MSG, {"role": "user", "content": sub}]))
+        except Exception as e:
+            print(f"[brain._orchestrate] worker '{worker}' failed, falling back to orchestrator: {e!r}")
             results.append(call_llm_with_fallback(orchestrator, [_IDENTITY_MSG, {"role": "user", "content": sub}]))
 
     for _round in range(MAX_ORCHESTRATOR_ROUNDS):

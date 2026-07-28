@@ -141,6 +141,14 @@ def chat(req: ChatRequest) -> ChatResponse:
         return ChatResponse(
             reply=f"Can't do that right now — {e}. Tell me to raise the cap or try again later."
         )
+    except Exception as e:
+        # ponytail: last-resort net -- an unexpected error anywhere in this
+        # flow (broken provider config, etc) should never surface as a raw
+        # 500 to Ruk. Logged here so it's still visible in the Space logs.
+        print(f"[/chat] unhandled error: {e!r}")
+        return ChatResponse(
+            reply="Kuch gadbad ho gayi mere end pe, Ruk — Space logs check kar, koi provider/config galat lag raha hai."
+        )
 
 
 def _handle_chat(req: ChatRequest) -> ChatResponse:
