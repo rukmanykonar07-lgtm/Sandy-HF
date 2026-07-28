@@ -9,6 +9,7 @@ Ruk can always override with plain language ("use only gemini",
 "start orchestrator mode") — that's parsed in main.py and passed in
 here as `override`, which always wins over auto-classification.
 """
+import concurrent.futures
 import json
 
 from llm import call_llm, call_llm_with_fallback, CapExceeded
@@ -49,18 +50,21 @@ def _run_tier(task: str, providers: list[str], context: str) -> str:
     messages = [_IDENTITY_MSG, {"role": "user", "content": f"{context}\n\nTask: {task}" if context else task}]
     answers = {}
     last_error = None
-    for p in providers:
-        try:
-            answers[p] = call_llm(p, messages)
-        except CapExceeded:
-            continue  # ponytail: skip a capped provider, don't fail the whole task
-        except Exception as e:
-            # ponytail: a single broken/misconfigured provider (bad model
-            # name, outage, whatever) shouldn't sink the whole task if the
-            # others in this tier can still answer -- skip it, keep going.
-            print(f"[brain._run_tier] provider '{p}' failed, skipping: {e!r}")
-            last_error = e
-            continue
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(providers)) as pool:
+        future_to_provider = {pool.submit(call_llm, p, messages): p for p in providers}
+        for future in concurrent.futures.as_completed(future_to_provider):
+            p = future_to_provider[future]
+            try:
+                answers[p] = future.result()
+            except CapExceeded:
+                continue  # ponytail: skip a capped provider, don't fail the whole task
+            except Exception as e:
+                # ponytail: a single broken/misconfigured provider (bad model
+                # name, outage, whatever) shouldn't sink the whole task if the
+                # others in this tier can still answer -- skip it, keep going.
+                print(f"[brain._run_tier] provider '{p}' failed, skipping: {e!r}")
+                last_error = e
+                continue
     if not answers:
         raise CapExceeded(str(last_error) if last_error else "all providers for this tier are capped")
     if len(answers) == 1:

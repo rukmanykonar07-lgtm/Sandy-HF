@@ -10,7 +10,7 @@ Flow per message:
 import json
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -27,12 +27,15 @@ from llm import call_llm, CapExceeded, MODELS
 app = FastAPI()
 
 
-def _remember(text: str, role: str) -> None:
+def _remember(background_tasks: BackgroundTasks, text: str, role: str) -> None:
     """Every message goes through here instead of calling memory.remember()
     directly -- saves the extracted-facts memory (Mem0) AND the verbatim
-    chat_log (for Ruk's Home's history-on-refresh), always together."""
-    memory.remember(text, role=role)
-    chatlog.log(text, role=role)
+    chat_log (for Ruk's Home's history-on-refresh), always together.
+    Scheduled as background tasks: this runs AFTER the reply is already
+    sent back, so Ruk isn't waiting on Mem0's LLM-based fact extraction
+    just to see the message he already got."""
+    background_tasks.add_task(memory.remember, text, role=role)
+    background_tasks.add_task(chatlog.log, text, role=role)
 
 app.add_middleware(
     CORSMiddleware,
@@ -132,9 +135,9 @@ def _needs_approval(message: str) -> bool:
 
 
 @app.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest) -> ChatResponse:
+def chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatResponse:
     try:
-        return _handle_chat(req)
+        return _handle_chat(req, background_tasks)
     except CapExceeded as e:
         # ponytail: one guard around the whole flow, not one per LLM call-site —
         # every path through this function calls an LLM somewhere.
@@ -151,10 +154,10 @@ def chat(req: ChatRequest) -> ChatResponse:
         )
 
 
-def _handle_chat(req: ChatRequest) -> ChatResponse:
+def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatResponse:
     cfg_change = _is_config_change(req.message)
     if cfg_change:
-        _remember(req.message, role="user")
+        _remember(background_tasks, req.message, role="user")
         if cfg_change["key"] == "caps":
             current = config.get_config("caps") or {}
             current.update(cfg_change["value"])
@@ -162,7 +165,7 @@ def _handle_chat(req: ChatRequest) -> ChatResponse:
         else:
             config.set_config(cfg_change["key"], cfg_change["value"])
         reply = f"Done, Ruk — updated {cfg_change['key']} to {cfg_change['value']}. 🎯"
-        _remember(reply, role="assistant")
+        _remember(background_tasks, reply, role="assistant")
         return ChatResponse(reply=reply)
 
     # If Ruk already has a pending self-edit proposal for this session and
@@ -170,12 +173,12 @@ def _handle_chat(req: ChatRequest) -> ChatResponse:
     # since re-running the LLM could in principle produce a different
     # proposal than what was actually shown and approved.
     if req.approved and req.session_id in selfmod._pending:
-        _remember(req.message, role="user")
+        _remember(background_tasks, req.message, role="user")
         try:
             reply = selfmod.apply_pending(req.session_id)
         except selfmod.GitOpError as e:
             reply = f"Ruk, edit push nahi ho paya: {e}"
-        _remember(reply, role="assistant")
+        _remember(background_tasks, reply, role="assistant")
         return ChatResponse(reply=reply)
 
     selfmod_req = selfmod.extract_selfmod_request(req.message)
@@ -209,12 +212,12 @@ def _handle_chat(req: ChatRequest) -> ChatResponse:
                     ),
                     needs_approval=True,
                 )
-            _remember(req.message, role="user")
+            _remember(background_tasks, req.message, role="user")
             try:
                 reply = selfmod.rollback_to(selfmod_req["commit_hash"])
             except selfmod.GitOpError as e:
                 reply = f"Ruk, rollback nahi ho paaya: {e}"
-            _remember(reply, role="assistant")
+            _remember(background_tasks, reply, role="assistant")
             return ChatResponse(reply=reply)
 
     mastery_req = mastery.extract_mastery_request(req.message)
@@ -231,11 +234,11 @@ def _handle_chat(req: ChatRequest) -> ChatResponse:
                 ),
                 needs_approval=True,
             )
-        _remember(req.message, role="user")
+        _remember(background_tasks, req.message, role="user")
         reply = mastery.start_mastery(
             mastery_req["skill"], mastery_req["days"], mastery_req["hours_per_day"]
         )
-        _remember(reply, role="assistant")
+        _remember(background_tasks, reply, role="assistant")
         return ChatResponse(reply=reply)
 
     if _needs_approval(req.message) and not req.approved:
@@ -247,12 +250,12 @@ def _handle_chat(req: ChatRequest) -> ChatResponse:
             needs_approval=True,
         )
 
-    _remember(req.message, role="user")
+    _remember(background_tasks, req.message, role="user")
     recalled = memory.recall(req.message)
     context = ("Things you remember about Ruk:\n" + "\n".join(recalled)) if recalled else ""
     override = req.override_llms or _extract_llm_override(req.message)
     reply = brain.answer(req.message, context=context, override=override)
-    _remember(reply, role="assistant")
+    _remember(background_tasks, reply, role="assistant")
     return ChatResponse(reply=reply)
 
 
