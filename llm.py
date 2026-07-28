@@ -14,7 +14,7 @@ import config
 MODELS = {
     "groq": "groq/llama-3.3-70b-versatile",
     "gemini": "gemini/gemini-3.5-flash",
-    "cerebras": "cerebras/llama-3.3-70b",
+    "cerebras": "cerebras/gpt-oss-120b",
 }
 
 # ponytail: call counts kept in the same sandy_config table via a
