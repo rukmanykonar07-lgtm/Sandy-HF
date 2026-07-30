@@ -10,7 +10,7 @@ the prompt template below. That's a separate, higher-risk piece.
 """
 import json
 
-from cron.jobs import create_job
+from cron.jobs import create_job, list_jobs
 from llm import call_llm_with_fallback
 
 MASTERY_PROMPT_TEMPLATE = """You are Sandy, working on becoming a master at: {skill}
@@ -73,3 +73,10 @@ def start_mastery(skill: str, days: int, hours_per_day: int) -> str:
         f"{days} din, roz ek session (~{hours_per_day}h target). "
         f"Job ID: {job.get('id', job)}. Progress notes roz milenge."
     )
+
+
+def list_mastery_jobs() -> list[dict]:
+    """Every registered Hermes cron job (mastery sessions and anything
+    else registered the same way), for Ruk's Home's Workflows view.
+    Real data straight from Hermes -- not a mock."""
+    return list_jobs(include_disabled=True)

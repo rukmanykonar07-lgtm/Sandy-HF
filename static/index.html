@@ -265,10 +265,11 @@
       </div>
       <div id="topbar-search">Search…</div>
       <select class="model-select" id="model-select">
-        <option>groq</option>
-        <option>gemini</option>
-        <option>cerebras</option>
-        <option>orchestrator</option>
+        <option value="">Auto (Sandy decides)</option>
+        <option value="groq">Groq only</option>
+        <option value="gemini">Gemini only</option>
+        <option value="cerebras">Cerebras only</option>
+        <option value="orchestrator">Orchestrator (all + loop)</option>
       </select>
       <div id="topbar-profile">
         <div class="avatar">R</div>
@@ -309,14 +310,29 @@
         </div>
       </section>
 
+      <!-- Memory (real Mem0 facts) -->
+      <section class="view" id="view-memory">
+        <div class="panel">
+          <div class="panel-header"><h2>Memory</h2><span class="count" id="memory-count"></span></div>
+          <div id="memory-list"></div>
+        </div>
+      </section>
+
       <!-- Placeholder views -->
       <section class="view" id="view-ai-core"></section>
       <section class="view" id="view-agents"></section>
       <section class="view" id="view-tasks"></section>
       <section class="view" id="view-calendar"></section>
-      <section class="view" id="view-memory"></section>
       <section class="view" id="view-knowledge-base"></section>
-      <section class="view" id="view-workflows"></section>
+
+      <!-- Workflows (real Hermes cron jobs) -->
+      <section class="view" id="view-workflows">
+        <div class="panel">
+          <div class="panel-header"><h2>Workflows</h2><span class="count" id="workflows-count"></span></div>
+          <div id="workflows-list"></div>
+        </div>
+      </section>
+
       <section class="view" id="view-settings"></section>
     </div>
 
@@ -380,9 +396,7 @@
     "agents": "Sandy doesn't run separate background agents yet — this will track Hermes cron/mastery jobs once mastery sessions are running for real.",
     "tasks": "No task-tracking system exists yet. Reserved for if/when Sandy gets a real task board.",
     "calendar": "Not connected to anything yet — reserved for a future calendar integration.",
-    "memory": "Will show real Mem0 facts and conversation stats once a read endpoint exists for it. Memory works today, it's just not visible here yet.",
     "knowledge-base": "Reserved for a future document/knowledge store. Nothing built here yet.",
-    "workflows": "Will show registered Hermes cron jobs (mastery sessions, etc) and their run history once that's wired up.",
     "settings": "Provider keys are managed via HF Space secrets for now, not in-app. Reserved for if that ever needs to move here.",
   };
 
@@ -510,6 +524,7 @@
     localStorage.setItem(TOKEN_KEY, val);
     tokenModal.classList.add("hidden");
     loadHistory();
+    fetchStatus();
   });
 
   // ---------- Conversations rendering ----------
@@ -561,11 +576,14 @@
   async function sendToSandy(message, approved) {
     setOrbState("thinking");
     document.getElementById("bb-send").disabled = true;
+    const modelChoice = document.getElementById("model-select").value;
+    const body = { message, session_id: SESSION_ID, approved: !!approved };
+    if (modelChoice) body.override_llms = [modelChoice];
     try {
       const res = await fetch("/chat", {
         method: "POST",
         headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
-        body: JSON.stringify({ message, session_id: SESSION_ID, approved: !!approved }),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
       setOrbState("speaking");
@@ -605,8 +623,78 @@
     if (e.key === "Enter") { e.preventDefault(); handleSend(); }
   });
 
+  // ---------- Real status data (caps, memory facts, Hermes jobs) ----------
+  async function fetchStatus() {
+    try {
+      const res = await fetch("/status", { headers: authHeaders() });
+      if (!res.ok) return;
+      const data = await res.json();
+      renderCaps(data.config);
+      renderMemory(data.memory_facts);
+      renderWorkflows(data.jobs);
+    } catch (e) {
+      console.warn("status fetch failed", e);
+    }
+  }
+
+  function renderCaps(cfg) {
+    if (!cfg) return; // leave the static base cards as-is if config read failed
+    const caps = cfg.caps || {};
+    const capText = (provider) => (provider in caps ? `Cap: ${caps[provider]}/day` : "No cap set");
+    document.querySelectorAll("#cc-core-grid .card-title").forEach((el) => {
+      const provider = el.textContent.trim().toLowerCase();
+      if (["groq", "gemini", "cerebras"].includes(provider)) {
+        el.parentElement.querySelector(".card-sub").textContent = capText(provider);
+      }
+    });
+  }
+
+  function renderMemory(facts) {
+    const listEl = document.getElementById("memory-list");
+    const countEl = document.getElementById("memory-count");
+    if (facts === null || facts === undefined) {
+      countEl.textContent = "";
+      listEl.innerHTML = `<div class="placeholder-view"><p>Couldn't load memory right now — check the Space logs.</p></div>`;
+      return;
+    }
+    countEl.textContent = facts.length + " facts";
+    if (facts.length === 0) {
+      listEl.innerHTML = `<div class="placeholder-view"><p>No facts stored yet — Sandy learns automatically as you chat.</p></div>`;
+      return;
+    }
+    listEl.innerHTML = `<div class="grid grid-cols-3">` + facts.map((f) => `
+      <div class="card"><div class="card-sub" style="color:var(--text)">${f}</div></div>
+    `).join("") + `</div>`;
+  }
+
+  function renderWorkflows(jobs) {
+    const listEl = document.getElementById("workflows-list");
+    const countEl = document.getElementById("workflows-count");
+    if (jobs === null || jobs === undefined) {
+      countEl.textContent = "";
+      listEl.innerHTML = `<div class="placeholder-view"><p>Couldn't load workflows right now — check the Space logs.</p></div>`;
+      return;
+    }
+    countEl.textContent = jobs.length + " registered";
+    if (jobs.length === 0) {
+      listEl.innerHTML = `<div class="placeholder-view"><p>No workflows registered yet — try "master &lt;skill&gt; for N days" in Conversations.</p></div>`;
+      return;
+    }
+    listEl.innerHTML = `<div class="grid grid-cols-3">` + jobs.map((j) => {
+      const repeat = j.repeat || {};
+      const progress = repeat.times ? `${repeat.completed || 0}/${repeat.times} sessions` : "";
+      const stateColor = j.state === "scheduled" ? "green" : j.state === "paused" ? "amber" : "red";
+      return `
+      <div class="card">
+        <div class="card-title">${j.name || j.id}<span class="badge badge-${stateColor}">${j.state || "unknown"}</span></div>
+        <div class="card-sub">${j.schedule_display || ""} ${progress ? "· " + progress : ""}</div>
+        ${j.last_error ? `<div class="card-sub" style="color:var(--red)">${j.last_error}</div>` : ""}
+      </div>`;
+    }).join("") + `</div>`;
+  }
+
   // ---------- Boot ----------
-  if (ensureToken()) loadHistory();
+  if (ensureToken()) { loadHistory(); fetchStatus(); }
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/service-worker.js").catch(() => {});
 })();
 </script>

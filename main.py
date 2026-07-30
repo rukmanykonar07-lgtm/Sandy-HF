@@ -291,6 +291,30 @@ def history(limit: int = 200):
     return {"messages": chatlog.get_history(limit=limit)}
 
 
+@app.get("/status")
+def status():
+    """Real data for Ruk's Home's dashboard views (Command Center, Memory,
+    Workflows) -- no mocked numbers. Each source is independently
+    try/except'd so one failing piece (e.g. Mem0 hiccup) doesn't blank
+    out the other two."""
+    try:
+        caps = config.get_all_config()
+    except Exception as e:
+        print(f"[/status] config read failed: {e!r}")
+        caps = None
+    try:
+        facts = memory.get_all_facts(limit=30)
+    except Exception as e:
+        print(f"[/status] memory read failed: {e!r}")
+        facts = None
+    try:
+        jobs = mastery.list_mastery_jobs()
+    except Exception as e:
+        print(f"[/status] job list read failed: {e!r}")
+        jobs = None
+    return {"config": caps, "memory_facts": facts, "jobs": jobs}
+
+
 # Ruk's Home -- served as a plain static PWA from this same backend, no
 # separate hosting/build step. service-worker.js and manifest.json are
 # served from root (not /static) so the PWA's scope covers the whole app.

@@ -62,6 +62,14 @@ def recall(query: str, limit: int = 5) -> list[str]:
     return [r["memory"] for r in results["results"]]
 
 
+def get_all_facts(limit: int = 50) -> list[str]:
+    """Every fact Mem0 has extracted and stored for Ruk, most recent
+    first -- for Ruk's Home's Memory view. Separate from recall(), which
+    is a semantic search against a specific query."""
+    results = _m().get_all(filters={"user_id": RUK}, top_k=limit)
+    return [r["memory"] for r in results["results"]]
+
+
 if __name__ == "__main__":
     # ponytail self-check: needs live Groq key + Supabase Postgres conn string.
     # Not a mock test — Mem0's value IS the real extraction behavior,
