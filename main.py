@@ -45,12 +45,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-RISKY_KEYWORDS = [
-    "delete", "remove file", "overwrite", "deploy", "hf space",
-    "hugging face space", "drop table", "format", "rm -rf", "uninstall",
-]
-
-
 class ChatRequest(BaseModel):
     message: str
     session_id: str = "default"
@@ -138,16 +132,6 @@ def _is_codebase_analysis_request(message: str) -> bool:
     )
     result = call_llm("groq", [{"role": "user", "content": prompt}]).strip().lower()
     return result.startswith("yes")
-
-
-def _needs_approval(message: str) -> bool:
-    cfg = config.get_all_config()
-    if cfg.get("always_ask_approval"):
-        return True
-    lower = message.lower()
-    if any(kw in lower for kw in RISKY_KEYWORDS):
-        return True
-    return any(flag.lower() in lower for flag in cfg.get("approval_required_for", []))
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -262,15 +246,6 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
         reply = codebase.analyze(req.message)
         _remember(background_tasks, reply, role="assistant")
         return ChatResponse(reply=reply)
-
-    if _needs_approval(req.message) and not req.approved:
-        # ponytail: don't save to memory yet — it gets saved once below,
-        # when the (approved) resend actually goes through. Saving here
-        # too would double up every risky message in memory.
-        return ChatResponse(
-            reply=f"Ruk, ye thoda risky lag raha hai: \"{req.message}\" — confirm karoge to karti hoon.",
-            needs_approval=True,
-        )
 
     _remember(background_tasks, req.message, role="user")
     recalled = memory.recall(req.message)
