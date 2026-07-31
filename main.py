@@ -19,7 +19,9 @@ from pydantic import BaseModel
 import chatlog
 import codebase
 import config
+import search
 from identity import SANDY_SYSTEM_PROMPT
+import search
 import memory
 import brain
 import mastery
@@ -51,6 +53,7 @@ class ChatRequest(BaseModel):
     session_id: str = "default"
     approved: bool = False       # frontend resends with this =true after Ruk confirms
     override_llms: list[str] | None = None  # e.g. ["gemini"] or ["orchestrator"]
+    search_provider: str | None = None  # "tavily" / "exa" / "linkup", or None = auto
 
 
 class ChatResponse(BaseModel):
@@ -132,6 +135,31 @@ def _is_logs_request(message: str) -> bool:
     )
     result = call_llm("groq", [{"role": "user", "content": prompt}]).strip().lower()
     return result.startswith("yes")
+
+
+def _is_search_request(message: str) -> bool:
+    """Does answering this well need current/external info from the web
+    (current events, specific facts, research on a topic), as opposed to
+    something Sandy can reason/write from her own knowledge?"""
+    prompt = (
+        "Does answering this well require looking something up on the web "
+        "(current events, specific facts, research on a topic, company/"
+        "competitor info, etc) rather than just reasoning or writing? "
+        "Answer with exactly one word: yes or no.\n"
+        f'Message: "{message}"'
+    )
+    result = call_llm("groq", [{"role": "user", "content": prompt}]).strip().lower()
+    return result.startswith("yes")
+
+
+def _extract_search_provider(message: str) -> str | None:
+    """Cheap keyword check (no LLM call needed) for an explicit provider
+    name in the message -- 'use exa for this' etc."""
+    lower = message.lower()
+    for p in ("tavily", "exa", "linkup"):
+        if p in lower:
+            return p
+    return None
 
 
 def _is_codebase_analysis_request(message: str) -> bool:
@@ -286,6 +314,18 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
     _remember(background_tasks, req.message, role="user")
     recalled = memory.recall(req.message)
     context = ("Things you remember about Ruk:\n" + "\n".join(recalled)) if recalled else ""
+
+    if _is_search_request(req.message):
+        tier = brain.classify_complexity(req.message)
+        provider = req.search_provider or _extract_search_provider(req.message)
+        try:
+            results = search.search(req.message, provider=provider, complexity=tier)
+            search_block = "\n\n".join(f"[{r['title']}]({r['url']})\n{r['content']}" for r in results)
+            context += f"\n\nWeb search results:\n{search_block}"
+        except Exception as e:
+            log(f"[/chat] search failed: {e!r}")
+            context += "\n\n(Web search was attempted but failed -- answer from your own knowledge, and tell Ruk the search didn't work right now.)"
+
     override = req.override_llms or _extract_llm_override(req.message)
     recent = chatlog.get_history(limit=10)
     history = [{"role": m["role"], "content": m["message"]} for m in recent]
