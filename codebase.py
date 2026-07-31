@@ -59,6 +59,18 @@ def analyze(instruction: str) -> str:
     return call_llm_with_fallback("gemini", [{"role": "user", "content": prompt}])
 
 
+def read_recent_logs(lines: int = 60) -> str:
+    """Last N lines of Sandy's own runtime log (errors from failed
+    provider calls, /status read failures, etc) -- for when Ruk asks
+    what went wrong recently. Written by llm.py's log() helper."""
+    try:
+        with open("/tmp/sandy.log", encoding="utf-8", errors="replace") as f:
+            all_lines = f.readlines()
+        return "".join(all_lines[-lines:]) or "(log file exists but is empty -- nothing's gone wrong recently)"
+    except FileNotFoundError:
+        return "(no log file yet this session -- nothing's been logged since the last restart)"
+
+
 if __name__ == "__main__":
     files = list_files()
     assert files, "list_files() found nothing -- REPO_DIR wrong or repo empty"

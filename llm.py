@@ -6,11 +6,25 @@ Cap enforcement lives here (checked before every call) so it's
 impossible for a router/orchestrator to accidentally bypass it.
 """
 import datetime
+import logging
 import re
 
 from litellm import completion
 
 import config
+
+logging.basicConfig(
+    filename="/tmp/sandy.log", level=logging.INFO, format="%(asctime)s %(message)s"
+)
+
+
+def log(msg: str) -> None:
+    """Every diagnostic message goes through here instead of a bare
+    print(): still prints (unchanged, visible in HF's live log viewer),
+    AND writes to /tmp/sandy.log so Sandy can read her own recent logs
+    when Ruk asks what went wrong."""
+    print(msg)
+    logging.info(msg)
 
 _JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?```$", re.DOTALL)
 

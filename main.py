@@ -19,11 +19,12 @@ from pydantic import BaseModel
 import chatlog
 import codebase
 import config
+from identity import SANDY_SYSTEM_PROMPT
 import memory
 import brain
 import mastery
 import selfmod
-from llm import call_llm, CapExceeded, MODELS, strip_json_fence
+from llm import call_llm, CapExceeded, MODELS, strip_json_fence, log
 
 app = FastAPI()
 
@@ -119,6 +120,20 @@ def _extract_llm_override(message: str) -> list[str] | None:
     return override
 
 
+def _is_logs_request(message: str) -> bool:
+    """Does this message ask Sandy to check her own recent runtime
+    logs/errors (what went wrong, what broke), as opposed to her source
+    code (that's _is_codebase_analysis_request)?"""
+    prompt = (
+        "Does this message ask Sandy to check her own recent runtime "
+        "logs, errors, or what went wrong while running (NOT her source "
+        "code files)? Answer with exactly one word: yes or no.\n"
+        f'Message: "{message}"'
+    )
+    result = call_llm("groq", [{"role": "user", "content": prompt}]).strip().lower()
+    return result.startswith("yes")
+
+
 def _is_codebase_analysis_request(message: str) -> bool:
     """Does this message ask Sandy to look at / review / scan / analyze
     her own actual code (read-only understanding) -- NOT asking her to
@@ -148,7 +163,7 @@ def chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatResponse:
         # ponytail: last-resort net -- an unexpected error anywhere in this
         # flow (broken provider config, etc) should never surface as a raw
         # 500 to Ruk. Logged here so it's still visible in the Space logs.
-        print(f"[/chat] unhandled error: {e!r}")
+        log(f"[/chat] unhandled error: {e!r}")
         return ChatResponse(
             reply="Kuch gadbad ho gayi mere end pe, Ruk — Space logs check kar, koi provider/config galat lag raha hai."
         )
@@ -226,9 +241,13 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
         # over days unattended -- always confirm first, same as risky
         # tasks, regardless of what the generic risk-classifier thinks.
         if not req.approved:
+            understanding = mastery.explain_understanding(
+                mastery_req["skill"], mastery_req["days"], mastery_req["hours_per_day"]
+            )
             return ChatResponse(
                 reply=(
-                    f"Ruk, confirm kar do — \"{mastery_req['skill']}\" mein master "
+                    f"{understanding}\n\n"
+                    f"Confirm kar do — \"{mastery_req['skill']}\" mein master "
                     f"banne ka mission, {mastery_req['days']} din, roz "
                     f"~{mastery_req['hours_per_day']}h — shuru karu?"
                 ),
@@ -244,6 +263,23 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
     if _is_codebase_analysis_request(req.message):
         _remember(background_tasks, req.message, role="user")
         reply = codebase.analyze(req.message)
+        _remember(background_tasks, reply, role="assistant")
+        return ChatResponse(reply=reply)
+
+    if _is_logs_request(req.message):
+        _remember(background_tasks, req.message, role="user")
+        logs = codebase.read_recent_logs()
+        reply = call_llm(
+            "gemini",
+            [
+                {"role": "system", "content": SANDY_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": f"Ruk's question: {req.message}\n\nYour recent runtime log:\n{logs}\n\n"
+                    "Answer in Hinglish, referencing what's actually in the log above.",
+                },
+            ],
+        )
         _remember(background_tasks, reply, role="assistant")
         return ChatResponse(reply=reply)
 
@@ -277,17 +313,17 @@ def status():
     try:
         caps = config.get_all_config()
     except Exception as e:
-        print(f"[/status] config read failed: {e!r}")
+        log(f"[/status] config read failed: {e!r}")
         caps = None
     try:
         facts = memory.get_all_facts(limit=30)
     except Exception as e:
-        print(f"[/status] memory read failed: {e!r}")
+        log(f"[/status] memory read failed: {e!r}")
         facts = None
     try:
         jobs = mastery.list_mastery_jobs()
     except Exception as e:
-        print(f"[/status] job list read failed: {e!r}")
+        log(f"[/status] job list read failed: {e!r}")
         jobs = None
     return {"config": caps, "memory_facts": facts, "jobs": jobs}
 

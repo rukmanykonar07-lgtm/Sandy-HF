@@ -12,7 +12,7 @@ here as `override`, which always wins over auto-classification.
 import concurrent.futures
 import json
 
-from llm import call_llm, call_llm_with_fallback, CapExceeded, strip_json_fence
+from llm import call_llm, call_llm_with_fallback, CapExceeded, strip_json_fence, log
 from identity import SANDY_SYSTEM_PROMPT
 
 _IDENTITY_MSG = {"role": "system", "content": SANDY_SYSTEM_PROMPT}
@@ -62,7 +62,7 @@ def _run_tier(task: str, providers: list[str], context: str, history: list[dict]
                 # ponytail: a single broken/misconfigured provider (bad model
                 # name, outage, whatever) shouldn't sink the whole task if the
                 # others in this tier can still answer -- skip it, keep going.
-                print(f"[brain._run_tier] provider '{p}' failed, skipping: {e!r}")
+                log(f"[brain._run_tier] provider '{p}' failed, skipping: {e!r}")
                 last_error = e
                 continue
     if not answers:
@@ -99,7 +99,7 @@ def _orchestrate(task: str, context: str, history: list[dict] | None = None) -> 
         except CapExceeded:
             return call_llm_with_fallback(orchestrator, msgs)
         except Exception as e:
-            print(f"[brain._orchestrate] worker '{worker}' failed, falling back to orchestrator: {e!r}")
+            log(f"[brain._orchestrate] worker '{worker}' failed, falling back to orchestrator: {e!r}")
             return call_llm_with_fallback(orchestrator, msgs)
 
     # Sub-tasks run concurrently -- "orchestration" wasn't actually

@@ -11,7 +11,10 @@ the prompt template below. That's a separate, higher-risk piece.
 import json
 
 from cron.jobs import create_job, list_jobs
+from identity import SANDY_SYSTEM_PROMPT
 from llm import call_llm_with_fallback, strip_json_fence
+
+_IDENTITY_MSG = {"role": "system", "content": SANDY_SYSTEM_PROMPT}
 
 MASTERY_PROMPT_TEMPLATE = """You are Sandy, working on becoming a master at: {skill}
 
@@ -52,6 +55,22 @@ def extract_mastery_request(message: str) -> dict | None:
     if not all(k in data for k in ("skill", "days", "hours_per_day")):
         return None
     return data
+
+
+def explain_understanding(skill: str, days: int, hours_per_day: float) -> str:
+    """Before Ruk confirms a multi-day mastery mission, write out what
+    Sandy actually understood the goal to be and how she'll approach the
+    first session -- shown alongside the confirm prompt, so a
+    misunderstanding gets caught before days of unattended cron sessions
+    run on it, not after."""
+    prompt = (
+        f"Ruk asked you to master \"{skill}\" over {days} days, "
+        f"~{hours_per_day}h/day, roz ek session. In Hinglish, 4-6 sentences: "
+        "what do you understand the actual goal to be, and roughly how "
+        "will you approach the first session? Be concrete and specific to "
+        "this skill, not generic corporate-sounding filler."
+    )
+    return call_llm_with_fallback("gemini", [_IDENTITY_MSG, {"role": "user", "content": prompt}])
 
 
 def start_mastery(skill: str, days: int, hours_per_day: int) -> str:
