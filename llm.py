@@ -6,10 +6,21 @@ Cap enforcement lives here (checked before every call) so it's
 impossible for a router/orchestrator to accidentally bypass it.
 """
 import datetime
+import re
 
 from litellm import completion
 
 import config
+
+_JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?```$", re.DOTALL)
+
+
+def strip_json_fence(raw: str) -> str:
+    """LLMs asked for 'JSON only' commonly wrap it in ```json ... ``` fences
+    anyway. Strip that before json.loads(), instead of treating valid-but-
+    fenced JSON as a parse failure and leaking the raw fenced text."""
+    m = _JSON_FENCE_RE.match(raw.strip())
+    return m.group(1) if m else raw
 
 MODELS = {
     "groq": "groq/llama-3.3-70b-versatile",

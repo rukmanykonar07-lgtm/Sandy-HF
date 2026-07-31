@@ -11,7 +11,7 @@ the prompt template below. That's a separate, higher-risk piece.
 import json
 
 from cron.jobs import create_job, list_jobs
-from llm import call_llm_with_fallback
+from llm import call_llm_with_fallback, strip_json_fence
 
 MASTERY_PROMPT_TEMPLATE = """You are Sandy, working on becoming a master at: {skill}
 
@@ -40,7 +40,7 @@ def extract_mastery_request(message: str) -> dict | None:
     )
     try:
         raw = call_llm_with_fallback("groq", [{"role": "user", "content": prompt}])
-        data = json.loads(raw)
+        data = json.loads(strip_json_fence(raw))
     except (json.JSONDecodeError, TypeError, ValueError):
         return None
     # Same fail-safe pattern as selfmod.extract_selfmod_request(): main.py

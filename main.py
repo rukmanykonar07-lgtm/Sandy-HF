@@ -23,7 +23,7 @@ import memory
 import brain
 import mastery
 import selfmod
-from llm import call_llm, CapExceeded, MODELS, strip_json_fence
+from llm import call_llm, CapExceeded, MODELS
 
 app = FastAPI()
 
@@ -44,6 +44,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+RISKY_KEYWORDS = [
+    "delete", "remove file", "overwrite", "deploy", "hf space",
+    "hugging face space", "drop table", "format", "rm -rf", "uninstall",
+]
+
 
 class ChatRequest(BaseModel):
     message: str
@@ -75,7 +81,7 @@ def _is_config_change(message: str) -> dict | None:
     )
     raw = call_llm("groq", [{"role": "user", "content": prompt}])
     try:
-        parsed = json.loads(strip_json_fence(raw))
+        parsed = json.loads(raw)
     except json.JSONDecodeError:
         return None
     if not isinstance(parsed, dict) or not parsed.get("is_config"):
@@ -105,7 +111,7 @@ def _extract_llm_override(message: str) -> list[str] | None:
     )
     raw = call_llm("groq", [{"role": "user", "content": prompt}])
     try:
-        parsed = json.loads(strip_json_fence(raw))
+        parsed = json.loads(raw)
     except json.JSONDecodeError:
         return None
     if not isinstance(parsed, dict):
@@ -132,6 +138,16 @@ def _is_codebase_analysis_request(message: str) -> bool:
     )
     result = call_llm("groq", [{"role": "user", "content": prompt}]).strip().lower()
     return result.startswith("yes")
+
+
+def _needs_approval(message: str) -> bool:
+    cfg = config.get_all_config()
+    if cfg.get("always_ask_approval"):
+        return True
+    lower = message.lower()
+    if any(kw in lower for kw in RISKY_KEYWORDS):
+        return True
+    return any(flag.lower() in lower for flag in cfg.get("approval_required_for", []))
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -247,13 +263,20 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
         _remember(background_tasks, reply, role="assistant")
         return ChatResponse(reply=reply)
 
+    if _needs_approval(req.message) and not req.approved:
+        # ponytail: don't save to memory yet — it gets saved once below,
+        # when the (approved) resend actually goes through. Saving here
+        # too would double up every risky message in memory.
+        return ChatResponse(
+            reply=f"Ruk, ye thoda risky lag raha hai: \"{req.message}\" — confirm karoge to karti hoon.",
+            needs_approval=True,
+        )
+
     _remember(background_tasks, req.message, role="user")
     recalled = memory.recall(req.message)
     context = ("Things you remember about Ruk:\n" + "\n".join(recalled)) if recalled else ""
     override = req.override_llms or _extract_llm_override(req.message)
-    recent = chatlog.get_history(limit=10)
-    history = [{"role": m["role"], "content": m["message"]} for m in recent]
-    reply = brain.answer(req.message, context=context, override=override, history=history)
+    reply = brain.answer(req.message, context=context, override=override)
     _remember(background_tasks, reply, role="assistant")
     return ChatResponse(reply=reply)
 
@@ -266,30 +289,6 @@ def health():
 @app.get("/history")
 def history(limit: int = 200):
     return {"messages": chatlog.get_history(limit=limit)}
-
-
-@app.get("/status")
-def status():
-    """Real data for Ruk's Home's dashboard views (Command Center, Memory,
-    Workflows) -- no mocked numbers. Each source is independently
-    try/except'd so one failing piece (e.g. Mem0 hiccup) doesn't blank
-    out the other two."""
-    try:
-        caps = config.get_all_config()
-    except Exception as e:
-        print(f"[/status] config read failed: {e!r}")
-        caps = None
-    try:
-        facts = memory.get_all_facts(limit=30)
-    except Exception as e:
-        print(f"[/status] memory read failed: {e!r}")
-        facts = None
-    try:
-        jobs = mastery.list_mastery_jobs()
-    except Exception as e:
-        print(f"[/status] job list read failed: {e!r}")
-        jobs = None
-    return {"config": caps, "memory_facts": facts, "jobs": jobs}
 
 
 # Ruk's Home -- served as a plain static PWA from this same backend, no

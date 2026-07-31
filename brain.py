@@ -12,7 +12,7 @@ here as `override`, which always wins over auto-classification.
 import concurrent.futures
 import json
 
-from llm import call_llm, call_llm_with_fallback, CapExceeded
+from llm import call_llm, call_llm_with_fallback, CapExceeded, strip_json_fence
 from identity import SANDY_SYSTEM_PROMPT
 
 _IDENTITY_MSG = {"role": "system", "content": SANDY_SYSTEM_PROMPT}
@@ -46,8 +46,8 @@ def _judge(task: str, answers: dict[str, str]) -> str:
     return call_llm_with_fallback("gemini", [_IDENTITY_MSG, {"role": "user", "content": prompt}])
 
 
-def _run_tier(task: str, providers: list[str], context: str) -> str:
-    messages = [_IDENTITY_MSG, {"role": "user", "content": f"{context}\n\nTask: {task}" if context else task}]
+def _run_tier(task: str, providers: list[str], context: str, history: list[dict] | None = None) -> str:
+    messages = [_IDENTITY_MSG] + (history or []) + [{"role": "user", "content": f"{context}\n\nTask: {task}" if context else task}]
     answers = {}
     last_error = None
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(providers)) as pool:
@@ -72,7 +72,7 @@ def _run_tier(task: str, providers: list[str], context: str) -> str:
     return _judge(task, answers)
 
 
-def _orchestrate(task: str, context: str) -> str:
+def _orchestrate(task: str, context: str, history: list[dict] | None = None) -> str:
     """Best-fit LLM plans subtasks, delegates, loops until satisfied."""
     orchestrator = "gemini"  # highest quality per Ruk's stack ranking
     workers = ["groq", "cerebras"]
@@ -83,33 +83,42 @@ def _orchestrate(task: str, context: str) -> str:
     )
     plan_raw = call_llm_with_fallback(orchestrator, [{"role": "user", "content": plan_prompt}])
     try:
-        subtasks = json.loads(plan_raw)["subtasks"]
+        subtasks = json.loads(strip_json_fence(plan_raw))["subtasks"]
         if not isinstance(subtasks, list) or not subtasks:
             raise ValueError
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         subtasks = [task]  # ponytail: bad/malformed plan -> fall back to treating it as one task
 
-    results = []
-    for i, sub in enumerate(subtasks):
+    def _run_subtask(i_sub):
+        i, sub = i_sub
         worker = workers[i % len(workers)]
+        sub_with_context = f"{context}\n\nSub-task: {sub}" if context else sub
+        msgs = [_IDENTITY_MSG] + (history or []) + [{"role": "user", "content": sub_with_context}]
         try:
-            results.append(call_llm(worker, [_IDENTITY_MSG, {"role": "user", "content": sub}]))
+            return call_llm(worker, msgs)
         except CapExceeded:
-            results.append(call_llm_with_fallback(orchestrator, [_IDENTITY_MSG, {"role": "user", "content": sub}]))
+            return call_llm_with_fallback(orchestrator, msgs)
         except Exception as e:
             print(f"[brain._orchestrate] worker '{worker}' failed, falling back to orchestrator: {e!r}")
-            results.append(call_llm_with_fallback(orchestrator, [_IDENTITY_MSG, {"role": "user", "content": sub}]))
+            return call_llm_with_fallback(orchestrator, msgs)
+
+    # Sub-tasks run concurrently -- "orchestration" wasn't actually
+    # parallel before despite the name; each worker call is independent
+    # so there's no reason to wait for one before starting the next.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(subtasks)) as pool:
+        results = list(pool.map(_run_subtask, enumerate(subtasks)))
 
     for _round in range(MAX_ORCHESTRATOR_ROUNDS):
         synth_prompt = (
-            f"Original task: {task}\n\nSub-task results:\n"
+            (f"{context}\n\n" if context else "")
+            + f"Original task: {task}\n\nSub-task results:\n"
             + "\n".join(f"{i+1}. {r}" for i, r in enumerate(results))
             + "\n\nIs this enough to fully answer the original task? "
             'Reply JSON: {"done": true, "answer": "..."} or {"done": false, "missing": "..."}'
         )
-        verdict_raw = call_llm_with_fallback(orchestrator, [{"role": "user", "content": synth_prompt}])
+        verdict_raw = call_llm_with_fallback(orchestrator, [_IDENTITY_MSG] + (history or []) + [{"role": "user", "content": synth_prompt}])
         try:
-            verdict = json.loads(verdict_raw)
+            verdict = json.loads(strip_json_fence(verdict_raw))
         except json.JSONDecodeError:
             return verdict_raw  # ponytail: orchestrator didn't return JSON -> just use its text as the answer
         if not isinstance(verdict, dict):
@@ -122,18 +131,20 @@ def _orchestrate(task: str, context: str) -> str:
     return results[-1]  # ran out of rounds -> best-effort last result
 
 
-def answer(task: str, context: str = "", override: list[str] | None = None) -> str:
+def answer(task: str, context: str = "", override: list[str] | None = None, history: list[dict] | None = None) -> str:
     """override: explicit provider list from Ruk (e.g. ["gemini"]), or
-    ["orchestrator"] to force orchestrator mode. None = auto-classify."""
+    ["orchestrator"] to force orchestrator mode. None = auto-classify.
+    history: recent conversation turns (from chatlog), so every call
+    actually has short-term memory, not just long-term Mem0 facts."""
     if override == ["orchestrator"]:
-        return _orchestrate(task, context)
+        return _orchestrate(task, context, history)
     if override:
-        return _run_tier(task, override, context)
+        return _run_tier(task, override, context, history)
 
     tier = classify_complexity(task)
     if tier == "very_complex":
-        return _orchestrate(task, context)
-    return _run_tier(task, TIERS[tier], context)
+        return _orchestrate(task, context, history)
+    return _run_tier(task, TIERS[tier], context, history)
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ import json
 import os
 import subprocess
 
-from llm import call_llm_with_fallback
+from llm import call_llm_with_fallback, strip_json_fence
 
 REPO_DIR = "/app"
 
@@ -104,7 +104,7 @@ def extract_selfmod_request(message: str) -> dict | None:
     )
     try:
         raw = call_llm_with_fallback("groq", [{"role": "user", "content": prompt}])
-        data = json.loads(raw)
+        data = json.loads(strip_json_fence(raw))
     except (json.JSONDecodeError, TypeError, ValueError):
         return None
     # Guard against malformed/off-schema LLM output (e.g. a dict missing
