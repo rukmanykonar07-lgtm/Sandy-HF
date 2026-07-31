@@ -23,7 +23,7 @@ import memory
 import brain
 import mastery
 import selfmod
-from llm import call_llm, CapExceeded, MODELS
+from llm import call_llm, CapExceeded, MODELS, strip_json_fence
 
 app = FastAPI()
 
@@ -75,7 +75,7 @@ def _is_config_change(message: str) -> dict | None:
     )
     raw = call_llm("groq", [{"role": "user", "content": prompt}])
     try:
-        parsed = json.loads(raw)
+        parsed = json.loads(strip_json_fence(raw))
     except json.JSONDecodeError:
         return None
     if not isinstance(parsed, dict) or not parsed.get("is_config"):
@@ -105,7 +105,7 @@ def _extract_llm_override(message: str) -> list[str] | None:
     )
     raw = call_llm("groq", [{"role": "user", "content": prompt}])
     try:
-        parsed = json.loads(raw)
+        parsed = json.loads(strip_json_fence(raw))
     except json.JSONDecodeError:
         return None
     if not isinstance(parsed, dict):
@@ -251,7 +251,9 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
     recalled = memory.recall(req.message)
     context = ("Things you remember about Ruk:\n" + "\n".join(recalled)) if recalled else ""
     override = req.override_llms or _extract_llm_override(req.message)
-    reply = brain.answer(req.message, context=context, override=override)
+    recent = chatlog.get_history(limit=10)
+    history = [{"role": m["role"], "content": m["message"]} for m in recent]
+    reply = brain.answer(req.message, context=context, override=override, history=history)
     _remember(background_tasks, reply, role="assistant")
     return ChatResponse(reply=reply)
 
