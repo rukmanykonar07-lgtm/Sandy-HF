@@ -17,6 +17,24 @@ from identity import SANDY_SYSTEM_PROMPT
 
 _IDENTITY_MSG = {"role": "system", "content": SANDY_SYSTEM_PROMPT}
 
+_HISTORY_FRAME = {
+    "role": "system",
+    "content": (
+        "The messages below (if any) are RECENT CONVERSATION HISTORY, for "
+        "background only. The actual question to answer is the LAST "
+        "message, sent just now. Do not confuse an old topic in this "
+        "history with the current question -- if unsure what's being "
+        "asked, ask Ruk to clarify rather than guessing or answering "
+        "something from earlier in the history."
+    ),
+}
+
+
+def _with_history(history: list[dict] | None) -> list[dict]:
+    """Wraps history with clear framing so it can't get mistaken for the
+    current question. Empty list if there's no history to frame."""
+    return [_HISTORY_FRAME] + history if history else []
+
 TIERS = {
     "simple": ["groq"],
     "medium": ["groq", "gemini"],
@@ -31,7 +49,7 @@ def classify_complexity(task: str) -> str:
         "simple, medium, complex, or very_complex.\n"
         f"Task: {task}\nAnswer with one word only."
     )
-    result = call_llm("groq", [{"role": "user", "content": prompt}]).strip().lower()
+    result = call_llm_with_fallback("groq", [{"role": "user", "content": prompt}]).strip().lower()
     return result if result in {"simple", "medium", "complex", "very_complex"} else "medium"
 
 
@@ -47,7 +65,7 @@ def _judge(task: str, answers: dict[str, str]) -> str:
 
 
 def _run_tier(task: str, providers: list[str], context: str, history: list[dict] | None = None) -> str:
-    messages = [_IDENTITY_MSG] + (history or []) + [{"role": "user", "content": f"{context}\n\nTask: {task}" if context else task}]
+    messages = [_IDENTITY_MSG] + _with_history(history) + [{"role": "user", "content": f"{context}\n\nTask: {task}" if context else task}]
     answers = {}
     last_error = None
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(providers)) as pool:
@@ -100,7 +118,7 @@ def _orchestrate(task: str, context: str, history: list[dict] | None = None) -> 
         i, sub = i_sub
         worker = workers[i % len(workers)]
         sub_with_context = f"{context}\n\nSub-task: {sub}" if context else sub
-        msgs = [_IDENTITY_MSG] + (history or []) + [{"role": "user", "content": sub_with_context}]
+        msgs = [_IDENTITY_MSG] + _with_history(history) + [{"role": "user", "content": sub_with_context}]
         try:
             return call_llm(worker, msgs)
         except Exception as e:
@@ -130,7 +148,7 @@ def _orchestrate(task: str, context: str, history: list[dict] | None = None) -> 
             'Reply JSON: {"done": true, "answer": "..."} or {"done": false, "missing": "..."}'
         )
         try:
-            verdict_raw = call_llm_with_fallback(orchestrator, [_IDENTITY_MSG] + (history or []) + [{"role": "user", "content": synth_prompt}])
+            verdict_raw = call_llm_with_fallback(orchestrator, [_IDENTITY_MSG] + _with_history(history) + [{"role": "user", "content": synth_prompt}])
         except Exception as e:
             # ponytail: every provider failed on synthesis -- the raw
             # worker results are still real, useful answers even

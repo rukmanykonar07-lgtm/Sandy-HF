@@ -26,7 +26,7 @@ import memory
 import brain
 import mastery
 import selfmod
-from llm import call_llm, CapExceeded, MODELS, strip_json_fence, log
+from llm import call_llm, call_llm_with_fallback, CapExceeded, MODELS, strip_json_fence, log
 
 app = FastAPI()
 
@@ -77,7 +77,7 @@ def _is_config_change(message: str) -> dict | None:
         'for caps, value is a dict like {"gemini": 100}). '
         'If no, reply exactly: {"is_config": false}'
     )
-    raw = call_llm("groq", [{"role": "user", "content": prompt}])
+    raw = call_llm_with_fallback("groq", [{"role": "user", "content": prompt}])
     try:
         parsed = json.loads(strip_json_fence(raw))
     except json.JSONDecodeError:
@@ -107,7 +107,7 @@ def _extract_llm_override(message: str) -> list[str] | None:
         '(or {"override": ["orchestrator"]}). '
         'If no, reply exactly: {"override": null}'
     )
-    raw = call_llm("groq", [{"role": "user", "content": prompt}])
+    raw = call_llm_with_fallback("groq", [{"role": "user", "content": prompt}])
     try:
         parsed = json.loads(strip_json_fence(raw))
     except json.JSONDecodeError:
@@ -133,7 +133,7 @@ def _is_logs_request(message: str) -> bool:
         "code files)? Answer with exactly one word: yes or no.\n"
         f'Message: "{message}"'
     )
-    result = call_llm("groq", [{"role": "user", "content": prompt}]).strip().lower()
+    result = call_llm_with_fallback("groq", [{"role": "user", "content": prompt}]).strip().lower()
     return result.startswith("yes")
 
 
@@ -148,7 +148,7 @@ def _is_search_request(message: str) -> bool:
         "Answer with exactly one word: yes or no.\n"
         f'Message: "{message}"'
     )
-    result = call_llm("groq", [{"role": "user", "content": prompt}]).strip().lower()
+    result = call_llm_with_fallback("groq", [{"role": "user", "content": prompt}]).strip().lower()
     return result.startswith("yes")
 
 
@@ -173,7 +173,7 @@ def _is_codebase_analysis_request(message: str) -> bool:
         "Answer with exactly one word: yes or no.\n"
         f'Message: "{message}"'
     )
-    result = call_llm("groq", [{"role": "user", "content": prompt}]).strip().lower()
+    result = call_llm_with_fallback("groq", [{"role": "user", "content": prompt}]).strip().lower()
     return result.startswith("yes")
 
 
@@ -313,7 +313,10 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
 
     _remember(background_tasks, req.message, role="user")
     recalled = memory.recall(req.message)
-    context = ("Things you remember about Ruk:\n" + "\n".join(recalled)) if recalled else ""
+    context = (
+        "Background facts Sandy remembers about Ruk (may or may not be relevant "
+        "to this specific question -- use only what actually applies):\n" + "\n".join(recalled)
+    ) if recalled else ""
 
     if _is_search_request(req.message):
         provider = req.search_provider or _extract_search_provider(req.message)
@@ -332,7 +335,7 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
             )
 
     override = req.override_llms or _extract_llm_override(req.message)
-    recent = chatlog.get_history(limit=10)
+    recent = chatlog.get_history(limit=30)
     history = [{"role": m["role"], "content": m["message"]} for m in recent]
     reply = brain.answer(req.message, context=context, override=override, history=history)
     _remember(background_tasks, reply, role="assistant")
