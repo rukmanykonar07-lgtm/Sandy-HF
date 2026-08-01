@@ -54,6 +54,8 @@ def extract_mastery_request(message: str) -> dict | None:
         return None
     if not all(k in data for k in ("skill", "days", "hours_per_day")):
         return None
+    if not isinstance(data["days"], (int, float)) or not isinstance(data["hours_per_day"], (int, float)):
+        return None  # classifier found a skill but no real duration -- treat as not a complete mastery request
     return data
 
 
