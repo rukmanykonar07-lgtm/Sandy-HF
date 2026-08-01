@@ -73,7 +73,10 @@ def _run_tier(task: str, providers: list[str], context: str, history: list[dict]
 
 
 def _orchestrate(task: str, context: str, history: list[dict] | None = None) -> str:
-    """Best-fit LLM plans subtasks, delegates, loops until satisfied."""
+    """Best-fit LLM plans subtasks, delegates, loops until satisfied.
+    Every LLM call here is wrapped so a provider outage/rate-limit can
+    degrade gracefully at each step -- this function should never raise
+    an unhandled exception, only ever return its best available answer."""
     orchestrator = "gemini"  # highest quality per Ruk's stack ranking
     workers = ["groq", "cerebras"]
     plan_prompt = (
@@ -81,13 +84,17 @@ def _orchestrate(task: str, context: str, history: list[dict] | None = None) -> 
         "Break this into 2-4 concrete sub-tasks that, done well, complete the task. "
         'Return JSON only: {"subtasks": ["...", "..."]}'
     )
-    plan_raw = call_llm_with_fallback(orchestrator, [{"role": "user", "content": plan_prompt}])
     try:
+        plan_raw = call_llm_with_fallback(orchestrator, [{"role": "user", "content": plan_prompt}])
         subtasks = json.loads(strip_json_fence(plan_raw))["subtasks"]
         if not isinstance(subtasks, list) or not subtasks:
             raise ValueError
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-        subtasks = [task]  # ponytail: bad/malformed plan -> fall back to treating it as one task
+    except Exception as e:
+        # ponytail: bad/malformed plan OR every provider failed on the
+        # planning call itself -> fall back to treating it as one task,
+        # same degradation either way.
+        log(f"[brain._orchestrate] planning failed, treating as single task: {e!r}")
+        subtasks = [task]
 
     def _run_subtask(i_sub):
         i, sub = i_sub
@@ -96,11 +103,17 @@ def _orchestrate(task: str, context: str, history: list[dict] | None = None) -> 
         msgs = [_IDENTITY_MSG] + (history or []) + [{"role": "user", "content": sub_with_context}]
         try:
             return call_llm(worker, msgs)
-        except CapExceeded:
-            return call_llm_with_fallback(orchestrator, msgs)
         except Exception as e:
-            log(f"[brain._orchestrate] worker '{worker}' failed, falling back to orchestrator: {e!r}")
-            return call_llm_with_fallback(orchestrator, msgs)
+            log(f"[brain._orchestrate] worker '{worker}' failed, trying orchestrator fallback: {e!r}")
+            try:
+                return call_llm_with_fallback(orchestrator, msgs)
+            except Exception as e2:
+                # ponytail: worker AND its fallback both failed (e.g. every
+                # provider rate-limited at once) -- don't crash the whole
+                # orchestration over one sub-task, return a clear
+                # placeholder so the synthesis step can work with what's left.
+                log(f"[brain._orchestrate] worker '{worker}' fallback also failed: {e2!r}")
+                return f"(this sub-task could not be completed: {sub} -- all providers failed)"
 
     # Sub-tasks run concurrently -- "orchestration" wasn't actually
     # parallel before despite the name; each worker call is independent
@@ -116,7 +129,14 @@ def _orchestrate(task: str, context: str, history: list[dict] | None = None) -> 
             + "\n\nIs this enough to fully answer the original task? "
             'Reply JSON: {"done": true, "answer": "..."} or {"done": false, "missing": "..."}'
         )
-        verdict_raw = call_llm_with_fallback(orchestrator, [_IDENTITY_MSG] + (history or []) + [{"role": "user", "content": synth_prompt}])
+        try:
+            verdict_raw = call_llm_with_fallback(orchestrator, [_IDENTITY_MSG] + (history or []) + [{"role": "user", "content": synth_prompt}])
+        except Exception as e:
+            # ponytail: every provider failed on synthesis -- the raw
+            # worker results are still real, useful answers even
+            # unsynthesized. Better than crashing.
+            log(f"[brain._orchestrate] synthesis failed, returning raw results: {e!r}")
+            return "\n\n".join(results)
         try:
             verdict = json.loads(strip_json_fence(verdict_raw))
         except json.JSONDecodeError:
@@ -125,7 +145,11 @@ def _orchestrate(task: str, context: str, history: list[dict] | None = None) -> 
             return verdict_raw
         if verdict.get("done"):
             return verdict.get("answer") or results[-1]  # malformed but done -> best-effort fallback
-        gap_answer = call_llm_with_fallback(orchestrator, [_IDENTITY_MSG, {"role": "user", "content": verdict.get("missing", task)}])
+        try:
+            gap_answer = call_llm_with_fallback(orchestrator, [_IDENTITY_MSG, {"role": "user", "content": verdict.get("missing", task)}])
+        except Exception as e:
+            log(f"[brain._orchestrate] gap-fill failed, stopping loop early: {e!r}")
+            return results[-1]  # best-effort -- can't fill the gap, return what we have
         results.append(gap_answer)
 
     return results[-1]  # ran out of rounds -> best-effort last result

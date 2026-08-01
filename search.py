@@ -61,14 +61,14 @@ def search(query: str, provider: str | None = None, complexity: str = "simple") 
     kill the whole search."""
     chosen = provider if provider in PROVIDERS else _COMPLEXITY_DEFAULT.get(complexity, "tavily")
     order = [chosen] + [p for p in PROVIDERS if p != chosen]
-    last_err = None
+    errors = []
     for p in order:
         try:
             return PROVIDERS[p](query)
         except Exception as e:
-            last_err = e
+            errors.append(f"{p}: {e}")
             continue
-    raise RuntimeError(f"All search providers failed: {last_err}")
+    raise RuntimeError("All search providers failed -- " + "; ".join(errors))
 
 
 if __name__ == "__main__":

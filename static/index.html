@@ -694,6 +694,13 @@
   }
 
   // ---------- Boot ----------
+  // ---------- Model choice persistence (survives refresh) ----------
+  const MODEL_KEY = "sandy_model_choice";
+  const modelSelect = document.getElementById("model-select");
+  const savedModel = localStorage.getItem(MODEL_KEY);
+  if (savedModel !== null) modelSelect.value = savedModel;
+  modelSelect.addEventListener("change", () => localStorage.setItem(MODEL_KEY, modelSelect.value));
+
   if (ensureToken()) { loadHistory(); fetchStatus(); }
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/service-worker.js").catch(() => {});
 })();

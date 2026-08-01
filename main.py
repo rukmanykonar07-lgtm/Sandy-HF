@@ -316,15 +316,20 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
     context = ("Things you remember about Ruk:\n" + "\n".join(recalled)) if recalled else ""
 
     if _is_search_request(req.message):
-        tier = brain.classify_complexity(req.message)
         provider = req.search_provider or _extract_search_provider(req.message)
         try:
+            tier = brain.classify_complexity(req.message)
             results = search.search(req.message, provider=provider, complexity=tier)
             search_block = "\n\n".join(f"[{r['title']}]({r['url']})\n{r['content']}" for r in results)
             context += f"\n\nWeb search results:\n{search_block}"
         except Exception as e:
             log(f"[/chat] search failed: {e!r}")
-            context += "\n\n(Web search was attempted but failed -- answer from your own knowledge, and tell Ruk the search didn't work right now.)"
+            context += (
+                "\n\n(Web search was attempted but FAILED with a real error -- "
+                "tell Ruk plainly that the search failed, don't soften it to "
+                "'slow', and suggest he check the Space logs. Then answer "
+                "from your own knowledge if you can.)"
+            )
 
     override = req.override_llms or _extract_llm_override(req.message)
     recent = chatlog.get_history(limit=10)
