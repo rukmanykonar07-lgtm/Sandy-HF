@@ -35,8 +35,6 @@ def _db() -> Client:
 
 DEFAULTS = {
     "caps": {"gemini": None, "groq": None, "cerebras": None},  # None = no cap
-    "approval_required_for": [],   # task descriptors user has opted IN to approval for
-    "always_ask_approval": False,  # global override, default off
 }
 
 
@@ -64,5 +62,4 @@ if __name__ == "__main__":
     # ponytail self-check: not a real network test (needs live Supabase),
     # just confirms defaults shape is sane before anything imports this.
     assert set(DEFAULTS["caps"].keys()) == {"gemini", "groq", "cerebras"}
-    assert isinstance(DEFAULTS["always_ask_approval"], bool)
     print("config.py: defaults OK")

@@ -26,15 +26,23 @@ def log(msg: str) -> None:
     print(msg)
     logging.info(msg)
 
-_JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?```$", re.DOTALL)
+_FENCE_RE = re.compile(r"^```[a-zA-Z0-9_+-]*\s*\n?(.*?)\n?```$", re.DOTALL)
+
+
+def strip_fence(raw: str) -> str:
+    """LLMs asked for 'raw content only, no fences' commonly wrap the
+    response in ```language ... ``` fences anyway. Strip that before
+    using the content for anything -- otherwise the literal fence
+    markers end up written into whatever the content becomes (a file,
+    a parsed JSON blob, etc)."""
+    m = _FENCE_RE.match(raw.strip())
+    return m.group(1) if m else raw
 
 
 def strip_json_fence(raw: str) -> str:
-    """LLMs asked for 'JSON only' commonly wrap it in ```json ... ``` fences
-    anyway. Strip that before json.loads(), instead of treating valid-but-
-    fenced JSON as a parse failure and leaking the raw fenced text."""
-    m = _JSON_FENCE_RE.match(raw.strip())
-    return m.group(1) if m else raw
+    """Same as strip_fence() -- kept as a separate name at JSON call
+    sites so it's clear what's being extracted there."""
+    return strip_fence(raw)
 
 MODELS = {
     "groq": "groq/llama-3.3-70b-versatile",

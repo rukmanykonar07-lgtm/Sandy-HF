@@ -11,7 +11,7 @@ import json
 import os
 import subprocess
 
-from llm import call_llm_with_fallback, strip_json_fence
+from llm import call_llm_with_fallback, strip_fence, strip_json_fence
 
 REPO_DIR = "/app"
 
@@ -132,7 +132,7 @@ def propose_edit(session_id: str, file_path: str, instruction: str) -> str:
         "Respond with ONLY the complete new file content -- no explanation, "
         "no markdown fences, just the raw file content."
     )
-    new_content = call_llm_with_fallback("gemini", [{"role": "user", "content": gen_prompt}])
+    new_content = strip_fence(call_llm_with_fallback("gemini", [{"role": "user", "content": gen_prompt}]))
 
     diff = "\n".join(difflib.unified_diff(
         old_content.splitlines(), new_content.splitlines(),
