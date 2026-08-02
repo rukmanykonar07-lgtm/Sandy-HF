@@ -92,12 +92,17 @@ def extract_selfmod_request(message: str) -> dict | None:
     history, or roll back a specific commit. Returns None if the message
     isn't any of these."""
     prompt = (
-        "Does this message ask Sandy to (a) edit/change her own code, "
-        "(b) show recent code-change history, or (c) undo/rollback a "
-        "specific past change? \n"
+        "Does this message ask Sandy to (a) edit/change her own code in a "
+        "SPECIFIC file that's actually named in the message, (b) show "
+        "recent code-change history, or (c) undo/rollback a specific past "
+        "change? A general feature request or 'build me X' with no "
+        "specific filename mentioned is NOT (a) -- answer none for those, "
+        "even if it clearly wants code to change somewhere.\n"
         f'Message: "{message}"\n'
         "Respond with ONLY one of these JSON shapes:\n"
-        '{"action": "edit", "file_path": "...", "instruction": "..."}\n'
+        '{"action": "edit", "file_path": "...", "instruction": "..."} '
+        '(file_path MUST be a filename literally written in the message -- '
+        'never guess or invent one)\n'
         '{"action": "history"}\n'
         '{"action": "rollback", "commit_hash": "..."}\n'
         '{"action": "none"}'
@@ -113,6 +118,14 @@ def extract_selfmod_request(message: str) -> dict | None:
     # crashes main.py's unguarded selfmod_req["action"] lookup.
     if not isinstance(data, dict) or data.get("action") in (None, "none"):
         return None
+    # Extra safety net even with the tightened prompt: if it's an edit
+    # action, the file_path must actually appear in the original message --
+    # otherwise it was invented, and we fail safe to "not a real request"
+    # rather than propose an edit to a made-up file.
+    if data.get("action") == "edit":
+        file_path = data.get("file_path", "")
+        if not file_path or file_path not in message:
+            return None
     return data
 
 

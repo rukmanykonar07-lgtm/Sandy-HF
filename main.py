@@ -316,6 +316,16 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
         "to this specific question -- use only what actually applies):\n" + "\n".join(recalled)
     ) if recalled else ""
 
+    date_range = chatlog.extract_date_range(req.message)
+    if date_range:
+        start, end = date_range
+        dated_msgs = chatlog.get_history_in_range(start, end)
+        if dated_msgs:
+            dated_block = "\n".join(f"[{m['created_at']}] {m['role']}: {m['message']}" for m in dated_msgs)
+            context += f"\n\nReal messages from {start} (the period Ruk is asking about):\n{dated_block}"
+        else:
+            context += f"\n\n(Ruk is asking about {start}, but no messages were found for that date -- tell him plainly, don't guess.)"
+
     if _is_search_request(req.message):
         provider = req.search_provider or _extract_search_provider(req.message)
         try:
