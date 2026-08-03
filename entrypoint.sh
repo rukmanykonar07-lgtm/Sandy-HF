@@ -12,6 +12,13 @@
 # below run. Confirmed by testing — set -e caused supervisord/gateway
 # to leak as orphaned processes when FastAPI crashed.
 
+# Restore ~/.hermes/cron/jobs.json from its last Supabase backup, if any
+# -- must run BEFORE supervisord/gateway below, since the gateway reads
+# jobs.json on its own startup. Without this, every rebuild (including
+# Sandy pushing her own self-edit) silently wiped all active mastery
+# jobs. Failure here should never block boot -- log and continue.
+python3 -c "import config; config.restore_hermes_jobs()" || echo "[entrypoint] jobs.json restore skipped/failed, continuing boot"
+
 supervisord -c /app/supervisord.conf &
 SUPERVISOR_PID=$!
 

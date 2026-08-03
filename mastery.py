@@ -89,6 +89,8 @@ def start_mastery(skill: str, days: int, hours_per_day: int) -> str:
         skills=["default"],
         enabled_toolsets=["web", "code_execution", "skills"],
     )
+    import config  # local import: config.py doesn't need Hermes, avoids a cycle at module load
+    config.backup_hermes_jobs()
     return (
         f"Theek hai Ruk! \"{skill}\" mein master banne ka mission shuru — "
         f"{days} din, roz ek session (~{hours_per_day}h target). "
