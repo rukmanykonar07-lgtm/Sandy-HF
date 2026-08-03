@@ -173,17 +173,26 @@ def _orchestrate(task: str, context: str, history: list[dict] | None = None) -> 
     return results[-1]  # ran out of rounds -> best-effort last result
 
 
-def answer(task: str, context: str = "", override: list[str] | None = None, history: list[dict] | None = None) -> str:
+def answer(
+    task: str,
+    context: str = "",
+    override: list[str] | None = None,
+    history: list[dict] | None = None,
+    tier: str | None = None,
+) -> str:
     """override: explicit provider list from Ruk (e.g. ["gemini"]), or
     ["orchestrator"] to force orchestrator mode. None = auto-classify.
     history: recent conversation turns (from chatlog), so every call
-    actually has short-term memory, not just long-term Mem0 facts."""
+    actually has short-term memory, not just long-term Mem0 facts.
+    tier: pass this in if the caller already ran classify_complexity()
+    for another reason (e.g. picking a search provider) -- skips a
+    second, redundant classification call for the same message."""
     if override == ["orchestrator"]:
         return _orchestrate(task, context, history)
     if override:
         return _run_tier(task, override, context, history)
 
-    tier = classify_complexity(task)
+    tier = tier or classify_complexity(task)
     if tier == "very_complex":
         return _orchestrate(task, context, history)
     return _run_tier(task, TIERS[tier], context, history)

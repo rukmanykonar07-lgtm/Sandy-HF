@@ -61,95 +61,6 @@ class ChatResponse(BaseModel):
     needs_approval: bool = False
 
 
-def _is_config_change(message: str) -> dict | None:
-    """Cheap check: does this message ask to change a cap/preference?
-    Returns the parsed {key, value} or None if it's a normal task."""
-    prompt = (
-        "Does this message ask to change an LLM credit cap? This does NOT "
-        "include requests to edit Sandy's own code/files, her identity/"
-        "personality, or how she talks/behaves -- those are handled "
-        "elsewhere, always answer false for those, even if they sound "
-        "like a 'preference'. "
-        f'Message: "{message}"\n'
-        'If yes, reply JSON: {"is_config": true, "key": "caps", "value": {"gemini": 100}} '
-        '(value is a dict like this, with the provider name and new cap number). '
-        'If no, reply exactly: {"is_config": false}'
-    )
-    raw = call_llm_with_fallback("groq", [{"role": "user", "content": prompt}])
-    try:
-        parsed = json.loads(strip_json_fence(raw))
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(parsed, dict) or not parsed.get("is_config"):
-        return None
-    if "key" not in parsed or "value" not in parsed:
-        return None  # malformed -> fail safe, treat as a normal task instead
-    return parsed
-
-
-def _extract_llm_override(message: str) -> list[str] | None:
-    """Does this message explicitly tell Sandy WHICH model(s) to use for
-    the task (not what the task itself is)? Returns a provider list for
-    brain.answer()'s `override`, or None to let auto-classification run
-    as usual. Provider names come from llm.MODELS, so adding a new
-    provider there (e.g. claude, kimi) is picked up here automatically."""
-    providers = list(MODELS)
-    prompt = (
-        "Does this message explicitly tell Sandy which LLM/model to use "
-        f"for this task? Valid providers: {', '.join(providers)}, or the "
-        "word 'orchestrator' for full multi-round mode. This is about "
-        "WHICH MODEL to use, not what the task is -- if the message is "
-        "just a normal task/question with no model mentioned, answer no.\n"
-        f'Message: "{message}"\n'
-        'If yes, reply JSON only: {"override": ["provider_name"]} '
-        '(or {"override": ["orchestrator"]}). '
-        'If no, reply exactly: {"override": null}'
-    )
-    raw = call_llm_with_fallback("groq", [{"role": "user", "content": prompt}])
-    try:
-        parsed = json.loads(strip_json_fence(raw))
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    override = parsed.get("override")
-    if not isinstance(override, list) or not override:
-        return None
-    valid = set(providers) | {"orchestrator"}
-    if not all(p in valid for p in override):
-        return None  # malformed/hallucinated provider name -> fail safe
-    return override
-
-
-def _is_logs_request(message: str) -> bool:
-    """Does this message ask Sandy to check her own recent runtime
-    logs/errors (what went wrong, what broke), as opposed to her source
-    code (that's _is_codebase_analysis_request)?"""
-    prompt = (
-        "Does this message ask Sandy to check her own recent runtime "
-        "logs, errors, or what went wrong while running (NOT her source "
-        "code files)? Answer with exactly one word: yes or no.\n"
-        f'Message: "{message}"'
-    )
-    result = call_llm_with_fallback("groq", [{"role": "user", "content": prompt}]).strip().lower()
-    return result.startswith("yes")
-
-
-def _is_search_request(message: str) -> bool:
-    """Does answering this well need current/external info from the web
-    (current events, specific facts, research on a topic), as opposed to
-    something Sandy can reason/write from her own knowledge?"""
-    prompt = (
-        "Does answering this well require looking something up on the web "
-        "(current events, specific facts, research on a topic, company/"
-        "competitor info, etc) rather than just reasoning or writing? "
-        "Answer with exactly one word: yes or no.\n"
-        f'Message: "{message}"'
-    )
-    result = call_llm_with_fallback("groq", [{"role": "user", "content": prompt}]).strip().lower()
-    return result.startswith("yes")
-
-
 def _extract_search_provider(message: str) -> str | None:
     """Cheap keyword check (no LLM call needed) for an explicit provider
     name in the message -- 'use exa for this' etc."""
@@ -160,19 +71,109 @@ def _extract_search_provider(message: str) -> str | None:
     return None
 
 
-def _is_codebase_analysis_request(message: str) -> bool:
-    """Does this message ask Sandy to look at / review / scan / analyze
-    her own actual code (read-only understanding) -- NOT asking her to
-    change/fix/edit anything, that's selfmod's job."""
+def classify_message(message: str) -> dict:
+    """ONE Groq call that replaces what used to be 7 separate classifier
+    calls (config-change, selfmod-extract, mastery-extract, codebase-
+    analysis, logs-request, search-need, llm-override) -- that stack was
+    the actual root cause of the Groq daily-quota exhaustion, since every
+    single message paid for 7-8 classification round trips before any
+    real answer even started, on top of Mem0's own internal Groq call.
+
+    temperature=0: this is structured classification, not creative
+    writing -- consistency matters far more than variety here, and it
+    also cuts down on malformed JSON / classifier misfires (which is
+    what was likely making search "randomly not trigger").
+
+    scode: one big prompt beats seven small ones -- same provider, same
+    trust boundary, one round trip instead of seven. All the original
+    fail-safe guards (never invent a filename, validate mastery field
+    types, reject hallucinated provider names) are preserved below,
+    checked against this single response instead of seven."""
+    providers = list(MODELS)
     prompt = (
-        "Does this message ask Sandy to look at, review, scan, or analyze "
-        "her own codebase/code/files in a read-only way (NOT asking her to "
-        "change, edit, or fix anything -- edits are handled elsewhere)? "
-        "Answer with exactly one word: yes or no.\n"
+        "Classify this one message from Ruk to Sandy across ALL of these axes at once. "
+        "Answer ONLY with this exact JSON shape, no markdown fences, no commentary:\n"
+        "{\n"
+        '  "config_change": {"is": true, "key": "caps", "value": {"provider_name": 100}} or null,\n'
+        '  "selfmod": {"action": "edit", "file_path": "...", "instruction": "..."} '
+        'or {"action": "history"} or {"action": "rollback", "commit_hash": "..."} or null,\n'
+        '  "mastery": {"skill": "...", "days": 3, "hours_per_day": 4} or null,\n'
+        '  "codebase_analysis": false,\n'
+        '  "logs_request": false,\n'
+        '  "search_needed": false,\n'
+        '  "llm_override": ["provider_name"] or null\n'
+        "}\n\n"
+        "Rules for each field:\n"
+        "- config_change: true ONLY for changing an LLM credit cap/limit number. NEVER true "
+        "for requests to edit Sandy's own code/files, her identity/personality, or how she "
+        "talks/behaves -- those go through selfmod or normal conversation, even if worded "
+        "like a preference.\n"
+        "- selfmod: 'edit' ONLY if a specific filename is literally written in the message -- "
+        "a general 'build me X' or 'fix the bug where...' with no filename named is NOT edit, "
+        "use null instead. Never invent a filename. 'history' = wants to see past code-change "
+        "log. 'rollback' = wants to undo a specific past commit (needs a commit hash).\n"
+        "- mastery: only set if Ruk asks Sandy to master/become expert at a skill AND gives "
+        "some time commitment (days and/or hours per day). If either is missing, use null.\n"
+        "- codebase_analysis: true only for READ-ONLY review/scan/analyze of Sandy's own "
+        "source code -- not asking to change/fix/edit anything (that's selfmod's job).\n"
+        "- logs_request: true only if asking about Sandy's recent RUNTIME logs/errors/what "
+        "went wrong while running -- not her source code.\n"
+        "- search_needed: true if answering well requires current/external info from the web "
+        "(current events, specific facts, research, competitor info) rather than reasoning/"
+        "writing from existing knowledge.\n"
+        "- llm_override: set ONLY if the message explicitly names WHICH model to use for the "
+        "task (not what the task is). Valid: " + ", ".join(providers) + ", or 'orchestrator' "
+        "for full multi-round mode. If no model is named, use null.\n\n"
         f'Message: "{message}"'
     )
-    result = call_llm_with_fallback("groq", [{"role": "user", "content": prompt}]).strip().lower()
-    return result.startswith("yes")
+    try:
+        raw = call_llm_with_fallback("groq", [{"role": "user", "content": prompt}], temperature=0)
+        data = json.loads(strip_json_fence(raw))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+
+    cfg = data.get("config_change")
+    if not isinstance(cfg, dict) or not cfg.get("is") or "key" not in cfg or "value" not in cfg:
+        cfg = None
+
+    selfmod_req = data.get("selfmod")
+    if isinstance(selfmod_req, dict) and selfmod_req.get("action") == "edit":
+        file_path = selfmod_req.get("file_path", "")
+        if not file_path or file_path not in message:
+            selfmod_req = None  # invented filename -> fail safe, not a real request
+    elif not isinstance(selfmod_req, dict) or selfmod_req.get("action") not in ("edit", "history", "rollback"):
+        selfmod_req = None
+
+    mastery_req = data.get("mastery")
+    if isinstance(mastery_req, dict):
+        if not all(k in mastery_req for k in ("skill", "days", "hours_per_day")):
+            mastery_req = None
+        elif not isinstance(mastery_req.get("days"), (int, float)) or not isinstance(
+            mastery_req.get("hours_per_day"), (int, float)
+        ):
+            mastery_req = None
+    else:
+        mastery_req = None
+
+    override = data.get("llm_override")
+    if not isinstance(override, list) or not override:
+        override = None
+    else:
+        valid = set(providers) | {"orchestrator"}
+        if not all(p in valid for p in override):
+            override = None  # hallucinated provider name -> fail safe
+
+    return {
+        "config_change": cfg,
+        "selfmod": selfmod_req,
+        "mastery": mastery_req,
+        "codebase_analysis": bool(data.get("codebase_analysis")),
+        "logs_request": bool(data.get("logs_request")),
+        "search_needed": bool(data.get("search_needed")),
+        "llm_override": override,
+    }
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -196,7 +197,23 @@ def chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatResponse:
 
 
 def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatResponse:
-    cfg_change = _is_config_change(req.message)
+    # If Ruk already has a pending self-edit proposal for this session and
+    # just approved it, apply it directly -- don't classify at all, since
+    # re-running any classifier on the approval turn could in principle
+    # disagree with what was actually shown and approved. Checked first,
+    # before spending a classify_message() call on it.
+    if req.approved and req.session_id in selfmod._pending:
+        _remember(background_tasks, req.message, role="user")
+        try:
+            reply = selfmod.apply_pending(req.session_id)
+        except selfmod.GitOpError as e:
+            reply = f"Ruk, edit push nahi ho paya: {e}"
+        _remember(background_tasks, reply, role="assistant")
+        return ChatResponse(reply=reply)
+
+    cls = classify_message(req.message)
+
+    cfg_change = cls["config_change"]
     if cfg_change:
         _remember(background_tasks, req.message, role="user")
         if cfg_change["key"] == "caps":
@@ -209,20 +226,7 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
         _remember(background_tasks, reply, role="assistant")
         return ChatResponse(reply=reply)
 
-    # If Ruk already has a pending self-edit proposal for this session and
-    # just approved it, apply it directly -- don't re-classify the text,
-    # since re-running the LLM could in principle produce a different
-    # proposal than what was actually shown and approved.
-    if req.approved and req.session_id in selfmod._pending:
-        _remember(background_tasks, req.message, role="user")
-        try:
-            reply = selfmod.apply_pending(req.session_id)
-        except selfmod.GitOpError as e:
-            reply = f"Ruk, edit push nahi ho paya: {e}"
-        _remember(background_tasks, reply, role="assistant")
-        return ChatResponse(reply=reply)
-
-    selfmod_req = selfmod.extract_selfmod_request(req.message)
+    selfmod_req = cls["selfmod"]
     if selfmod_req:
         action = selfmod_req["action"]
 
@@ -261,7 +265,7 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
             _remember(background_tasks, reply, role="assistant")
             return ChatResponse(reply=reply)
 
-    mastery_req = mastery.extract_mastery_request(req.message)
+    mastery_req = cls["mastery"]
     if mastery_req:
         # Kicking off a multi-day autonomous job spends real API credits
         # over days unattended -- always confirm first, same as risky
@@ -286,13 +290,13 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
         _remember(background_tasks, reply, role="assistant")
         return ChatResponse(reply=reply)
 
-    if _is_codebase_analysis_request(req.message):
+    if cls["codebase_analysis"]:
         _remember(background_tasks, req.message, role="user")
         reply = codebase.analyze(req.message)
         _remember(background_tasks, reply, role="assistant")
         return ChatResponse(reply=reply)
 
-    if _is_logs_request(req.message):
+    if cls["logs_request"]:
         _remember(background_tasks, req.message, role="user")
         logs = codebase.read_recent_logs()
         reply = call_llm(
@@ -326,10 +330,16 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
         else:
             context += f"\n\n(Ruk is asking about {start}, but no messages were found for that date -- tell him plainly, don't guess.)"
 
-    if _is_search_request(req.message):
+    # Computed at most once, here -- brain.answer() below reuses this
+    # instead of re-classifying complexity a second time internally.
+    # ponytail: this used to be classify_complexity() called twice per
+    # search-needing message (once here, once again inside brain.answer),
+    # two separate Groq calls classifying the exact same message.
+    tier = None
+    if cls["search_needed"]:
+        tier = brain.classify_complexity(req.message)
         provider = req.search_provider or _extract_search_provider(req.message)
         try:
-            tier = brain.classify_complexity(req.message)
             results = search.search(req.message, provider=provider, complexity=tier)
             search_block = "\n\n".join(f"[{r['title']}]({r['url']})\n{r['content']}" for r in results)
             context += f"\n\nWeb search results:\n{search_block}"
@@ -342,10 +352,10 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
                 "from your own knowledge if you can.)"
             )
 
-    override = req.override_llms or _extract_llm_override(req.message)
+    override = req.override_llms or cls["llm_override"]
     recent = chatlog.get_history(limit=30)
     history = [{"role": m["role"], "content": m["message"]} for m in recent]
-    reply = brain.answer(req.message, context=context, override=override, history=history)
+    reply = brain.answer(req.message, context=context, override=override, history=history, tier=tier)
     _remember(background_tasks, reply, role="assistant")
     return ChatResponse(reply=reply)
 

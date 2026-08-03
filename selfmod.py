@@ -6,6 +6,7 @@ starts from Ruk explicitly asking for a specific change.
 Also gives Ruk /chat visibility into edit history and rollback (git log
 / git revert), so a bad push can be undone from chat, not just by hand.
 """
+import ast
 import difflib
 import json
 import os
@@ -146,6 +147,16 @@ def propose_edit(session_id: str, file_path: str, instruction: str) -> str:
         "no markdown fences, just the raw file content."
     )
     new_content = strip_fence(call_llm_with_fallback("gemini", [{"role": "user", "content": gen_prompt}]))
+
+    if file_path.endswith(".py"):
+        try:
+            ast.parse(new_content)
+        except SyntaxError as e:
+            return (
+                f"Ruk, generated edit mein Python syntax error hai (line {e.lineno}: {e.msg}) "
+                "-- proposal reject kar di, kuch push nahi hua. Instruction thoda aur specific "
+                "de ke phir try karo."
+            )
 
     diff = "\n".join(difflib.unified_diff(
         old_content.splitlines(), new_content.splitlines(),
