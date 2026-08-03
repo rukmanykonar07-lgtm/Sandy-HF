@@ -45,10 +45,24 @@
 
   /* ---------- Sidebar ---------- */
   #sidebar {
-    width: 220px; flex: 0 0 auto; background: var(--panel);
+    width: 220px; flex: 0 0 auto; background: var(--panel); position: relative;
     border-right: 1px solid var(--border); display: flex; flex-direction: column;
-    padding: 18px 14px;
+    padding: 18px 14px; transition: width 0.15s ease, padding 0.15s ease;
   }
+  #sidebar.collapsed { width: 60px; padding: 18px 8px; }
+  #sidebar.collapsed #logo { justify-content: center; padding: 4px 0 20px; }
+  #sidebar.collapsed #logo-text, #sidebar.collapsed #logo-sub,
+  #sidebar.collapsed .nav-item span, #sidebar.collapsed #sidebar-orb-status .label,
+  #sidebar.collapsed #sidebar-orb-status .status-text { display: none; }
+  #sidebar.collapsed .nav-item { justify-content: center; }
+  #sidebar.collapsed #sidebar-orb-status { padding: 10px 4px; }
+  #sidebar-toggle {
+    position: absolute; top: 22px; right: -11px; width: 22px; height: 22px; border-radius: 50%;
+    background: var(--card); border: 1px solid var(--border); display: flex; align-items: center;
+    justify-content: center; cursor: pointer; color: var(--text-dim); font-size: 12px; z-index: 5;
+    user-select: none;
+  }
+  #sidebar-toggle:hover { color: var(--cyan); border-color: var(--cyan); }
   #logo { display: flex; align-items: center; gap: 10px; padding: 4px 6px 20px; }
   #logo-orb {
     width: 32px; height: 32px; border-radius: 50%; flex: 0 0 auto;
@@ -161,6 +175,30 @@
   .badge-red { background: rgba(239,68,68,0.15); color: var(--red); }
   .badge-cyan { background: var(--cyan-dim); color: var(--cyan); }
 
+  .usage-bar-track { height: 5px; border-radius: 3px; background: var(--border); margin-top: 8px; overflow: hidden; }
+  .usage-bar-fill { height: 100%; border-radius: 3px; background: var(--green); transition: width 0.2s ease; }
+  .usage-bar-fill.amber { background: var(--amber); }
+  .usage-bar-fill.red { background: var(--red); }
+
+  #conv-header {
+    display: flex; align-items: center; justify-content: space-between; padding: 4px 2px 14px;
+  }
+  #conv-header h2 { font-size: 15px; font-weight: 600; }
+  #new-chat-btn {
+    display: flex; align-items: center; gap: 6px; padding: 7px 13px; border-radius: 8px;
+    background: var(--card); border: 1px solid var(--border); color: var(--text); font-size: 12.5px;
+    font-weight: 600; cursor: pointer;
+  }
+  #new-chat-btn:hover { border-color: var(--cyan); color: var(--cyan); }
+  .session-summary-bubble {
+    background: var(--cyan-dim); border: 1px solid rgba(34,211,238,0.25); border-radius: 12px;
+    padding: 12px 16px; font-size: 12.5px; color: var(--text); white-space: pre-wrap; margin-bottom: 10px;
+  }
+  .session-summary-bubble .label {
+    font-family: 'JetBrains Mono', monospace; font-size: 9.5px; color: var(--cyan);
+    letter-spacing: 0.1em; margin-bottom: 6px; text-transform: uppercase;
+  }
+
   .placeholder-view {
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     min-height: 50vh; text-align: center; color: var(--text-dim);
@@ -241,6 +279,7 @@
 
 <div id="shell">
   <aside id="sidebar">
+    <div id="sidebar-toggle" title="Collapse sidebar">‹</div>
     <div id="logo">
       <div id="logo-orb"></div>
       <div>
@@ -299,6 +338,10 @@
 
       <!-- Conversations (real chat) -->
       <section class="view" id="view-conversations">
+        <div id="conv-header">
+          <h2>Conversations</h2>
+          <div id="new-chat-btn">+ New Chat</div>
+        </div>
         <div id="conv-log"></div>
       </section>
 
@@ -428,16 +471,17 @@
 
   // ---------- Command Center content (Sandy-real categories, not the reference's fake tools) ----------
   document.getElementById("cc-core-grid").innerHTML = [
-    ["Groq", "Configured", "green", "Fast tier, primary classifier calls"],
-    ["Gemini", "Configured", "green", "Quality tier + orchestrator"],
-    ["Cerebras", "Configured", "green", "gpt-oss-120b, reasoning/volume tier"],
-    ["Memory (Mem0)", "Ready", "green", "Supabase pgvector, auto fact extraction"],
-    ["Chat Log", "Ready", "green", "Verbatim history for Ruk's Home"],
-    ["Hermes Gateway", "Running", "green", "Background cron + mastery sessions"],
-  ].map(([name, status, color, sub]) => `
-    <div class="card">
+    ["Groq", "groq", "Configured", "green", "Fast tier, primary classifier calls"],
+    ["Gemini", "gemini", "Configured", "green", "Quality tier + orchestrator"],
+    ["Cerebras", "cerebras", "Configured", "green", "gpt-oss-120b, reasoning/volume tier"],
+    ["Memory (Mem0)", "", "Ready", "green", "Supabase pgvector, auto fact extraction"],
+    ["Chat Log", "", "Ready", "green", "Verbatim history for Ruk's Home"],
+    ["Hermes Gateway", "", "Running", "green", "Background cron + mastery sessions"],
+  ].map(([name, provider, status, color, sub]) => `
+    <div class="card"${provider ? ` data-provider="${provider}"` : ""}>
       <div class="card-title">${name}<span class="badge badge-${color}">${status}</span></div>
       <div class="card-sub">${sub}</div>
+      ${provider ? `<div class="usage-bar-track" style="display:none"><div class="usage-bar-fill"></div></div>` : ""}
     </div>`).join("");
 
   document.getElementById("cc-cap-grid").innerHTML = [
@@ -623,13 +667,44 @@
     if (e.key === "Enter") { e.preventDefault(); handleSend(); }
   });
 
+  // ---------- Collapsible sidebar ----------
+  const sidebarEl = document.getElementById("sidebar");
+  const sidebarToggle = document.getElementById("sidebar-toggle");
+  function setSidebarCollapsed(collapsed) {
+    sidebarEl.classList.toggle("collapsed", collapsed);
+    sidebarToggle.textContent = collapsed ? "›" : "‹";
+    localStorage.setItem("sandy-sidebar-collapsed", collapsed ? "1" : "0");
+  }
+  sidebarToggle.addEventListener("click", () => {
+    setSidebarCollapsed(!sidebarEl.classList.contains("collapsed"));
+  });
+  setSidebarCollapsed(localStorage.getItem("sandy-sidebar-collapsed") === "1");
+
+  // ---------- New Chat: summarize since the last reset, clear the ----------
+  // visible pane only. chat_log/Mem0 keep everything -- this is purely a
+  // clean visual start + a recap, not a real separate session.
+  document.getElementById("new-chat-btn").addEventListener("click", async () => {
+    const btn = document.getElementById("new-chat-btn");
+    const original = btn.textContent;
+    btn.textContent = "Summarizing…";
+    try {
+      const res = await fetch("/new_chat", { method: "POST", headers: authHeaders() });
+      const data = await res.json();
+      convLog.innerHTML = `<div class="session-summary-bubble"><div class="label">Last session recap</div>${data.summary}</div>`;
+    } catch (e) {
+      console.warn("new_chat failed", e);
+    } finally {
+      btn.textContent = original;
+    }
+  });
+
   // ---------- Real status data (caps, memory facts, Hermes jobs) ----------
   async function fetchStatus() {
     try {
       const res = await fetch("/status", { headers: authHeaders() });
       if (!res.ok) return;
       const data = await res.json();
-      renderCaps(data.config);
+      renderCaps(data.config, data.usage);
       renderMemory(data.memory_facts);
       renderWorkflows(data.jobs);
     } catch (e) {
@@ -637,15 +712,27 @@
     }
   }
 
-  function renderCaps(cfg) {
+  function renderCaps(cfg, usage) {
     if (!cfg) return; // leave the static base cards as-is if config read failed
     const caps = cfg.caps || {};
-    const capText = (provider) => (provider in caps ? `Cap: ${caps[provider]}/day` : "No cap set");
-    document.querySelectorAll("#cc-core-grid .card-title").forEach((el) => {
-      const provider = el.textContent.trim().toLowerCase();
-      if (["groq", "gemini", "cerebras"].includes(provider)) {
-        el.parentElement.querySelector(".card-sub").textContent = capText(provider);
-      }
+    // scode: this used to match on a card's full textContent (name +
+    // badge text glued together, e.g. "GroqConfigured") against
+    // ["groq","gemini","cerebras"] -- that never once matched, so caps
+    // silently never rendered. data-provider on the card itself is the
+    // direct, unambiguous fix.
+    document.querySelectorAll("#cc-core-grid [data-provider]").forEach((card) => {
+      const provider = card.dataset.provider;
+      const cap = caps[provider];
+      const used = (usage && usage[provider]) || 0;
+      card.querySelector(".card-sub").textContent =
+        cap == null ? "No cap set" : `${used} / ${cap} calls today`;
+      const track = card.querySelector(".usage-bar-track");
+      if (cap == null) { track.style.display = "none"; return; }
+      track.style.display = "block";
+      const pct = Math.min(100, (used / cap) * 100);
+      const fill = track.querySelector(".usage-bar-fill");
+      fill.style.width = pct + "%";
+      fill.className = "usage-bar-fill" + (pct >= 90 ? " red" : pct >= 70 ? " amber" : "");
     });
   }
 

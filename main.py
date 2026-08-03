@@ -360,6 +360,42 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
     return ChatResponse(reply=reply)
 
 
+@app.post("/new_chat")
+def new_chat():
+    """'New Chat' button: summarizes everything since the last reset
+    (what got done, what's still open) and marks a fresh boundary in
+    chat_log. Purely a visual reset for Ruk's Home -- the real chat_log
+    history and Mem0's permanent facts are untouched, so Sandy's actual
+    memory never shrinks. Deliberately NOT a real separate session (see
+    the handoff doc for why: chat_log has no session concept, and adding
+    one is a bigger schema change than this feature needs)."""
+    recent = chatlog.get_history(limit=200)
+    since_last = []
+    for m in reversed(recent):
+        if m["message"].startswith("[SESSION SUMMARY]"):
+            break
+        since_last.append(m)
+    since_last.reverse()
+
+    if not since_last:
+        summary = "Koi naya kaam nahi hua pichhle reset ke baad, Ruk."
+    else:
+        convo = "\n".join(f"{m['role']}: {m['message']}" for m in since_last)
+        summary = call_llm(
+            "gemini",
+            [{
+                "role": "user",
+                "content": (
+                    "Summarize this conversation between Ruk and Sandy in Hinglish, "
+                    "short and concrete: what got done, what's still open/remaining. "
+                    "A few lines, no filler.\n\n" + convo
+                ),
+            }],
+        )
+    chatlog.log(f"[SESSION SUMMARY] {summary}", role="assistant")
+    return {"summary": summary}
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -382,6 +418,11 @@ def status():
         log(f"[/status] config read failed: {e!r}")
         caps = None
     try:
+        usage = config.get_config("usage")
+    except Exception as e:
+        log(f"[/status] usage read failed: {e!r}")
+        usage = None
+    try:
         facts = memory.get_all_facts(limit=30)
     except Exception as e:
         log(f"[/status] memory read failed: {e!r}")
@@ -391,7 +432,7 @@ def status():
     except Exception as e:
         log(f"[/status] job list read failed: {e!r}")
         jobs = None
-    return {"config": caps, "memory_facts": facts, "jobs": jobs}
+    return {"config": caps, "usage": usage, "memory_facts": facts, "jobs": jobs}
 
 
 # Ruk's Home -- served as a plain static PWA from this same backend, no
