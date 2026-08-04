@@ -185,6 +185,25 @@ def _self_check_output(worker: str, sub_task: str, output: str) -> str:
         return output
 
 
+def _research_log_summary(research_log: list[dict]) -> str:
+    """Turns the raw list of every search attempt this run into a short
+    report for the review step: which tool actually worked vs failed,
+    and whether the same (or near-same) query got run more than once by
+    different sources -- wasted calls, not real extra research."""
+    if not research_log:
+        return ""
+    lines = [f"- \"{r['query']}\" via {r['provider']} ({'ok' if r['ok'] else 'FAILED'}, by {r['source']})" for r in research_log]
+    seen: dict[str, list[str]] = {}
+    for r in research_log:
+        key = r["query"].strip().lower()
+        seen.setdefault(key, []).append(r["source"])
+    dupes = [f"\"{q}\" searched by both {', '.join(sources)}" for q, sources in seen.items() if len(sources) > 1]
+    summary = "\n\nResearch tools used this run:\n" + "\n".join(lines)
+    if dupes:
+        summary += "\n\nPossible duplicate research (wasted calls, not extra insight): " + "; ".join(dupes)
+    return summary
+
+
 def _judge(task: str, answers: dict[str, str], confidences: dict[str, tuple[int | None, str]] | None = None) -> str:
     """One LLM picks/merges the best answer out of several. If self-rated
     confidence scores came through, the merge is told about them
@@ -264,7 +283,7 @@ def _research_queries(topic: str, angle: str = "") -> list[str]:
     return [topic]
 
 
-def _research(topic: str, angle: str = "") -> str:
+def _research(topic: str, angle: str = "", log_list: list[dict] | None = None) -> str:
     """Runs up to MAX_RESEARCH_QUERIES real searches across different
     angles on a topic, returns a combined findings block. Deliberately
     rotates across Tavily/Exa/Linkup instead of defaulting every query
@@ -273,7 +292,11 @@ def _research(topic: str, angle: str = "") -> str:
     cheap, Exa neural/conceptual, Linkup deep/structured), so actual
     variety across a multi-angle research pass beats always reaching
     for the same one and treating the other two as pure insurance.
-    Any individual search failing is just skipped, never raised."""
+    Any individual search failing is just skipped, never raised.
+    log_list: if given, every attempt (query, provider, ok/fail) gets
+    appended -- lets the review step later check whether a tool was
+    actually working and whether work was duplicated, not just trust
+    that research silently happened correctly."""
     providers = ["linkup", "exa", "tavily"]  # deep-understanding query first, then conceptual, then fast
     findings = []
     for i, q in enumerate(_research_queries(topic, angle)):
@@ -283,8 +306,12 @@ def _research(topic: str, angle: str = "") -> str:
             block = "\n".join(f"- {r['title']}: {r['content'][:300]}" for r in results[:3])
             if block:
                 findings.append(f"[{q} via {provider}]\n{block}")
+            if log_list is not None:
+                log_list.append({"query": q, "provider": provider, "source": "gemini-research", "ok": True})
         except Exception as e:
             log(f"[brain._research] search '{q}' via {provider} failed, skipping: {e!r}")
+            if log_list is not None:
+                log_list.append({"query": q, "provider": provider, "source": "gemini-research", "ok": False})
     return "\n\n".join(findings)
 
 
@@ -304,9 +331,12 @@ def _orchestrate(task: str, context: str, history: list[dict] | None = None) -> 
     the best available partial result, never an unhandled crash."""
     orchestrator = "gemini"
     workers = ["groq", "cerebras"]
+    research_log: list[dict] = []  # every search this run makes: query, provider, source, ok/fail --
+                                    # lets the review step check tools are actually working and
+                                    # workers aren't quietly duplicating each other's searches
 
     skill_context = _find_relevant_skill(task)
-    research = _research(task)
+    research = _research(task, log_list=research_log)
     if skill_context:
         research = f"{skill_context}\n\n{research}" if research else skill_context
     plan_prompt = (
@@ -330,19 +360,32 @@ def _orchestrate(task: str, context: str, history: list[dict] | None = None) -> 
     def _worker_own_research(worker: str, sub_task: str, notes: str) -> str:
         """One shot for the worker to ask for ONE more targeted search on
         top of what Gemini already gave it -- filling a gap specific to
-        its own piece, not redoing Gemini's broader research."""
+        its own piece, not redoing Gemini's broader research. The worker
+        also picks which tool actually fits its need (fast fact-check vs
+        conceptual vs deep/structured), not just whatever the default
+        happens to be -- real agency over the tool, matching how a
+        person would actually pick a search engine for the question."""
         try:
             need_prompt = (
                 f"Sub-task: {sub_task}\nGiven research: {notes}\n\n"
                 "Do you need ONE more specific web search to do this well "
-                "(exact syntax, a specific tool's docs, etc)? "
-                'Reply JSON only: {"query": "..."} or {"query": null}'
+                "(exact syntax, a specific tool's docs, etc)? If yes, also "
+                "pick whichever tool actually fits: 'tavily' (fast/quick "
+                "facts), 'exa' (conceptual/similar approaches), 'linkup' "
+                "(deep/structured). "
+                'Reply JSON only: {"query": "...", "provider": "tavily"} or {"query": null}'
             )
             need_raw = call_llm_with_fallback(worker, [{"role": "user", "content": need_prompt}])
             need = json.loads(strip_json_fence(need_raw))
             if need.get("query"):
-                results = _cached_search(need["query"])
-                return "\n".join(f"- {r['title']}: {r['content'][:300]}" for r in results[:3])
+                provider = need.get("provider") if need.get("provider") in ("tavily", "exa", "linkup") else None
+                try:
+                    results = _cached_search(need["query"], provider)
+                    research_log.append({"query": need["query"], "provider": provider or "default", "source": worker, "ok": True})
+                    return "\n".join(f"- {r['title']}: {r['content'][:300]}" for r in results[:3])
+                except Exception as e:
+                    research_log.append({"query": need["query"], "provider": provider or "default", "source": worker, "ok": False})
+                    raise
         except Exception as e:
             log(f"[brain._orchestrate] worker '{worker}' own-research skipped: {e!r}")
         return ""
@@ -403,16 +446,21 @@ def _orchestrate(task: str, context: str, history: list[dict] | None = None) -> 
             + f"Original task: {task}\n\nWorker outputs:\n"
             + "\n".join(f"{i+1}. {r}" for i, r in enumerate(results))
             + conf_note
+            + _research_log_summary(research_log)
             + "\n\nReview this. Check specifically: (a) is this enough to "
             "fully answer the original task, (b) do any worker outputs "
             "CONFLICT with each other -- different assumptions, mismatched "
             "approaches, inconsistent naming/structure between pieces that "
             "are supposed to fit together. That's the most common real "
             "source of bugs when separate workers build separate pieces. "
+            "(c) did any search tool actually fail this run -- if so, "
+            "consider whether the missing info matters enough to retry with "
+            "a different tool. (d) was research duplicated across workers "
+            "-- if so, note it as wasted effort, not a real problem to fix. "
             "Low-confidence outputs deserve extra scrutiny here. "
             'Reply JSON only: {"done": true, "answer": "..."} or '
             '{"done": false, "conflicts": "...", "missing": "...", '
-            '"research_query": "..." or null}'
+            '"research_query": "..." or null, "research_provider": "tavily" or null}'
         )
         try:
             verdict_raw = call_llm_with_fallback(
@@ -432,13 +480,18 @@ def _orchestrate(task: str, context: str, history: list[dict] | None = None) -> 
 
         # Only research again if the review step actually asked for it --
         # informed by what the workers produced, not a blind re-search.
+        # Uses whichever tool Gemini itself picked (research_provider),
+        # since by this point it's seen which tools worked/failed above.
         extra_research = ""
         if verdict.get("research_query"):
+            provider = verdict.get("research_provider") if verdict.get("research_provider") in ("tavily", "exa", "linkup") else None
             try:
-                r = _cached_search(verdict["research_query"])
+                r = _cached_search(verdict["research_query"], provider)
                 extra_research = "\n".join(f"- {x['title']}: {x['content'][:300]}" for x in r[:3])
+                research_log.append({"query": verdict["research_query"], "provider": provider or "default", "source": "gemini-review", "ok": True})
             except Exception as e:
                 log(f"[brain._orchestrate] round-{_round} research failed, skipping: {e!r}")
+                research_log.append({"query": verdict["research_query"], "provider": provider or "default", "source": "gemini-review", "ok": False})
 
         replan_prompt = (
             f"Original task: {task}\nWorker outputs so far:\n"
