@@ -12,24 +12,36 @@ from tavily import TavilyClient
 
 def _tavily_search(query: str, max_results: int = 5) -> list[dict]:
     """Fastest, cheapest -- good default for normal/quick research."""
-    client = TavilyClient(api_key=os.environ["TAVILY"])
+    client = TavilyClient(api_key=os.environ["TAVILY"].strip())
     data = client.search(query, search_depth="basic", max_results=max_results)
     return [{"title": r.get("title", ""), "url": r["url"], "content": r.get("content", "")} for r in data["results"]]
 
 
 def _exa_search(query: str, max_results: int = 5) -> list[dict]:
-    """Neural/semantic search -- better for conceptual, nuanced research."""
-    client = Exa(api_key=os.environ["EXA"])
-    data = client.search_and_contents(query, num_results=max_results, text=True)
+    """Neural/semantic search -- better for conceptual, nuanced research.
+
+    Bypasses exa_py's search_and_contents() wrapper on purpose. The
+    pinned SDK (1.0.2) is many major versions behind Exa's live API
+    (latest is 2.16.2 as of writing) -- the API now returns an 'image'
+    field on results that this old SDK's Result dataclass doesn't
+    define, so constructing it crashes with
+    "Result.__init__() got an unexpected keyword argument 'image'"
+    before we ever see a single result. Calling the same underlying
+    request() the SDK's own search_and_contents() uses internally, but
+    building a plain dict ourselves instead of that dataclass, sidesteps
+    the version mismatch without a risky major-version bump (2.x changed
+    enough that it isn't a safe drop-in replacement)."""
+    client = Exa(api_key=os.environ["EXA"].strip())
+    data = client.request("/search", {"query": query, "numResults": max_results, "contents": {"text": True}})
     return [
-        {"title": r.title or "", "url": r.url, "content": (r.text or "")[:1500]}
-        for r in data.results
+        {"title": r.get("title") or "", "url": r.get("url", ""), "content": (r.get("text") or "")[:1500]}
+        for r in data.get("results", [])
     ]
 
 
 def _linkup_search(query: str, max_results: int = 5) -> list[dict]:
     """Deep/structured search -- best for the most thorough research needs."""
-    client = LinkupClient(api_key=os.environ["LINKUP"])
+    client = LinkupClient(api_key=os.environ["LINKUP"].strip())
     data = client.search(query=query, depth="deep", output_type="searchResults")
     results = data.get("results", []) if isinstance(data, dict) else getattr(data, "results", [])
     out = []

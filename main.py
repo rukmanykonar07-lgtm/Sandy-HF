@@ -9,6 +9,7 @@ Flow per message:
 """
 import json
 import os
+import re
 
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,14 +32,43 @@ from llm import call_llm, call_llm_with_fallback, CapExceeded, MODELS, strip_jso
 app = FastAPI()
 
 
+_TRIVIAL_WORDS = {
+    "hey", "hi", "hello", "yo", "sup", "wassup", "sandy", "bro", "ruk",
+    "whats", "what's", "up", "kya", "haal", "hai", "kaisa", "kaise", "ho",
+    "thanks", "thank", "you", "ok", "okay", "k", "cool", "nice", "great",
+    "good", "bye", "gm", "gn", "morning", "night", "acha", "theek", "thik",
+    "hows", "how's", "going", "there", "it", "man", "today",
+}
+
+
+def _is_trivial(text: str) -> bool:
+    """Greetings and one-word acknowledgments (in any order, however
+    Ruk actually addresses her -- 'hey sandy whats up', 'sandy hows it
+    going', etc) aren't worth an LLM extraction call. Mem0 was storing
+    'Ruk asked what's up on July 20' as if it were a real fact about
+    him, then recalling that noise back at him on the next 'hey'.
+    Skipping extraction here fixes that AND cuts a real Groq call per
+    trivial message. Capped at 6 words: long enough to catch real
+    greetings, short enough that a genuine question built from common
+    words doesn't accidentally get treated as trivial."""
+    words = re.findall(r"[a-zA-Z']+", text.lower())
+    if not words or len(words) > 6:
+        return False
+    return all(w in _TRIVIAL_WORDS for w in words)
+
+
 def _remember(background_tasks: BackgroundTasks, text: str, role: str) -> None:
     """Every message goes through here instead of calling memory.remember()
     directly -- saves the extracted-facts memory (Mem0) AND the verbatim
     chat_log (for Ruk's Home's history-on-refresh), always together.
     Scheduled as background tasks: this runs AFTER the reply is already
     sent back, so Ruk isn't waiting on Mem0's LLM-based fact extraction
-    just to see the message he already got."""
-    background_tasks.add_task(memory.remember, text, role=role)
+    just to see the message he already got. chat_log always gets the
+    real message either way -- only the Mem0 extraction call is skipped
+    for trivial text, since raw history should stay complete even when
+    there's nothing worth extracting as a permanent fact."""
+    if not _is_trivial(text):
+        background_tasks.add_task(memory.remember, text, role=role)
     background_tasks.add_task(chatlog.log, text, role=role)
 
 app.add_middleware(

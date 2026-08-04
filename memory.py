@@ -10,6 +10,8 @@ import os
 
 from mem0 import Memory
 
+from llm import log
+
 RUK = "ruk"  # single user for now — multi-user is a config value away, not a rewrite
 
 _config = {
@@ -52,8 +54,16 @@ def _m() -> Memory:
 
 def remember(message: str, role: str = "user") -> None:
     """Store a message so Sandy can recall it later. Mem0 auto-extracts
-    the actual facts worth keeping — we don't decide what's important."""
-    _m().add(message, user_id=RUK, metadata={"role": role})
+    the actual facts worth keeping -- we don't decide what's important.
+    Best-effort: if this fails (e.g. Groq's TPD cap, which Mem0's own
+    internal LLM call doesn't respect Sandy's cap system for), the raw
+    message is still safe in chat_log -- losing one fact extraction is
+    not worth crashing the background task over, which is exactly what
+    was happening before this try/except existed."""
+    try:
+        _m().add(message, user_id=RUK, metadata={"role": role})
+    except Exception as e:
+        log(f"[memory.remember] Mem0 extraction failed, message stays in chat_log only: {e!r}")
 
 
 def recall(query: str, limit: int = 5) -> list[str]:
