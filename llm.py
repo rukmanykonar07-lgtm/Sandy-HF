@@ -50,6 +50,40 @@ MODELS = {
     "cerebras": "cerebras/gpt-oss-120b",
 }
 
+# scode: free-tier context ceilings, confirmed against each provider's own
+# docs (Cerebras's 8,192 is real and is why it was dying in 1-2 messages --
+# not a credits problem, every provider was getting the same ~2.5-3k token
+# history/identity blob and Cerebras just can't hold that much). Unlisted
+# provider -> generous fallback, no truncation.
+CONTEXT_LIMITS = {"cerebras": 8_192}
+_DEFAULT_CONTEXT_LIMIT = 128_000
+_RESPONSE_RESERVE = 1_500  # leave room for the actual reply, not just the prompt
+
+
+def _estimate_tokens(text: str) -> int:
+    return len(text) // 4  # standard rough heuristic -- good enough without a live tokenizer
+
+
+def fit_to_budget(messages: list[dict], provider: str) -> list[dict]:
+    """Trims oldest history first until the message list fits the
+    provider's real context window. Always keeps the first message
+    (system/identity prompt) and the last (the actual current task) --
+    those are never dropped, only what's in between."""
+    budget = CONTEXT_LIMITS.get(provider, _DEFAULT_CONTEXT_LIMIT) - _RESPONSE_RESERVE
+    if len(messages) <= 2 or budget <= 0:
+        return messages
+    head, tail = messages[0], messages[-1]
+    used = _estimate_tokens(head["content"]) + _estimate_tokens(tail["content"])
+    kept = []
+    for m in reversed(messages[1:-1]):  # most recent history first
+        t = _estimate_tokens(m["content"])
+        if used + t > budget:
+            break
+        kept.append(m)
+        used += t
+    kept.reverse()
+    return [head] + kept + [tail]
+
 # ponytail: call counts kept in the same sandy_config table via a
 # "usage" key, not a new table â€” one less thing to provision.
 
@@ -85,6 +119,7 @@ def call_llm(provider: str, messages: list[dict], **kwargs) -> str:
     if provider not in MODELS:
         raise ValueError(f"unknown provider: {provider}")
     _check_and_bump_cap(provider)
+    messages = fit_to_budget(messages, provider)
     response = completion(model=MODELS[provider], messages=messages, **kwargs)
     return response.choices[0].message.content
 

@@ -17,7 +17,7 @@ import time
 
 import mastery
 import search
-from llm import call_llm, call_llm_with_fallback, CapExceeded, strip_fence, strip_json_fence, log
+from llm import call_llm, call_llm_with_fallback, CapExceeded, MODELS, strip_fence, strip_json_fence, log
 from identity import SANDY_SYSTEM_PROMPT
 
 _IDENTITY_MSG = {"role": "system", "content": SANDY_SYSTEM_PROMPT}
@@ -252,6 +252,14 @@ def _run_tier(task: str, providers: list[str], context: str, history: list[dict]
                 last_error = e
                 continue
     if not answers:
+        for p in [m for m in MODELS if m not in providers]:  # last resort: try what this tier never had
+            try:
+                raw = call_llm(p, messages)
+                clean, _, _ = _extract_confidence(raw)
+                return clean
+            except Exception as e:
+                log(f"[brain._run_tier] last-resort provider '{p}' also failed: {e!r}")
+                last_error = e
         raise CapExceeded(str(last_error) if last_error else "all providers for this tier are capped")
     if len(answers) == 1:
         return next(iter(answers.values()))
