@@ -58,18 +58,16 @@ def _is_trivial(text: str) -> bool:
 
 
 def _remember(background_tasks: BackgroundTasks, text: str, role: str) -> None:
-    """Every message goes through here instead of calling memory.remember()
-    directly -- saves the extracted-facts memory (Mem0) AND the verbatim
-    chat_log (for Ruk's Home's history-on-refresh), always together.
-    Scheduled as background tasks: this runs AFTER the reply is already
-    sent back, so Ruk isn't waiting on Mem0's LLM-based fact extraction
-    just to see the message he already got. chat_log always gets the
-    real message either way -- only the Mem0 extraction call is skipped
-    for trivial text, since raw history should stay complete even when
-    there's nothing worth extracting as a permanent fact."""
+    """chat_log gets written SYNCHRONOUSLY, before the response returns --
+    it's a fast, cheap DB insert, and Ruk closing the tab right after
+    getting a reply was racing the old background-task write, causing
+    the exact 'latest messages disappear on reopen' bug he reported.
+    Mem0's fact extraction stays backgrounded since that's the genuinely
+    slow, LLM-based part actually worth deferring -- no reason to make
+    Ruk wait on it just to see a message he already got."""
+    chatlog.log(text, role=role)
     if not _is_trivial(text):
         background_tasks.add_task(memory.remember, text, role=role)
-    background_tasks.add_task(chatlog.log, text, role=role)
 
 app.add_middleware(
     CORSMiddleware,
@@ -241,6 +239,24 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
         _remember(background_tasks, reply, role="assistant")
         return ChatResponse(reply=reply)
 
+    # A pending mastery plan takes priority over classification -- a
+    # feedback message like "add more research to this" has no skill/
+    # days/hours in it, so classify_message would never recognize it as
+    # a mastery request on its own. Route straight to approve-or-revise.
+    pending_plan = mastery.get_pending_plan(req.session_id)
+    if pending_plan:
+        _remember(background_tasks, req.message, role="user")
+        if req.approved:
+            reply = mastery.confirm_plan(req.session_id)
+        else:
+            plan = mastery.propose_plan(
+                req.session_id, pending_plan["skill"], pending_plan["days"], pending_plan["hours_per_day"],
+                feedback=req.message,
+            )
+            reply = f"{plan}\n\nTheek hai ab? Confirm karo ya aur changes bolo."
+        _remember(background_tasks, reply, role="assistant")
+        return ChatResponse(reply=reply, needs_approval=not req.approved)
+
     cls = classify_message(req.message)
 
     cfg_change = cls["config_change"]
@@ -301,22 +317,15 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
         # over days unattended -- always confirm first, same as risky
         # tasks, regardless of what the generic risk-classifier thinks.
         if not req.approved:
-            understanding = mastery.explain_understanding(
-                mastery_req["skill"], mastery_req["days"], mastery_req["hours_per_day"]
+            _remember(background_tasks, req.message, role="user")
+            plan = mastery.propose_plan(
+                req.session_id, mastery_req["skill"], mastery_req["days"], mastery_req["hours_per_day"]
             )
-            return ChatResponse(
-                reply=(
-                    f"{understanding}\n\n"
-                    f"Confirm kar do — \"{mastery_req['skill']}\" mein master "
-                    f"banne ka mission, {mastery_req['days']} din, roz "
-                    f"~{mastery_req['hours_per_day']}h — shuru karu?"
-                ),
-                needs_approval=True,
-            )
+            reply = f"{plan}\n\nRuk, ye plan theek hai? Confirm karo, ya jo change karna hai bol do."
+            _remember(background_tasks, reply, role="assistant")
+            return ChatResponse(reply=reply, needs_approval=True)
         _remember(background_tasks, req.message, role="user")
-        reply = mastery.start_mastery(
-            mastery_req["skill"], mastery_req["days"], mastery_req["hours_per_day"]
-        )
+        reply = mastery.confirm_plan(req.session_id)
         _remember(background_tasks, reply, role="assistant")
         return ChatResponse(reply=reply)
 
@@ -462,7 +471,12 @@ def status():
     except Exception as e:
         log(f"[/status] job list read failed: {e!r}")
         jobs = None
-    return {"config": caps, "usage": usage, "memory_facts": facts, "jobs": jobs}
+    try:
+        graph = config.get_config("last_orchestration_graph")
+    except Exception as e:
+        log(f"[/status] orchestration graph read failed: {e!r}")
+        graph = None
+    return {"config": caps, "usage": usage, "memory_facts": facts, "jobs": jobs, "models": MODELS, "orchestration_graph": graph}
 
 
 # Ruk's Home -- served as a plain static PWA from this same backend, no

@@ -56,13 +56,6 @@
   #sidebar.collapsed #sidebar-orb-status .status-text { display: none; }
   #sidebar.collapsed .nav-item { justify-content: center; }
   #sidebar.collapsed #sidebar-orb-status { padding: 10px 4px; }
-  #sidebar-toggle {
-    position: absolute; top: 22px; right: -11px; width: 22px; height: 22px; border-radius: 50%;
-    background: var(--card); border: 1px solid var(--border); display: flex; align-items: center;
-    justify-content: center; cursor: pointer; color: var(--text-dim); font-size: 12px; z-index: 5;
-    user-select: none;
-  }
-  #sidebar-toggle:hover { color: var(--cyan); border-color: var(--cyan); }
   #logo { display: flex; align-items: center; gap: 10px; padding: 4px 6px 20px; }
   #logo-orb {
     width: 32px; height: 32px; border-radius: 50%; flex: 0 0 auto;
@@ -179,6 +172,14 @@
   .usage-bar-fill { height: 100%; border-radius: 3px; background: var(--green); transition: width 0.2s ease; }
   .usage-bar-fill.amber { background: var(--amber); }
   .usage-bar-fill.red { background: var(--red); }
+  #cc-core-grid [data-provider] { cursor: pointer; transition: border-color 0.15s ease; }
+  #cc-core-grid [data-provider]:hover { border-color: var(--cyan); }
+  .graph-node circle { stroke-width: 2; cursor: default; }
+  .graph-node.task circle { fill: var(--cyan-dim); stroke: var(--cyan); }
+  .graph-node.subtask circle { fill: rgba(255,255,255,0.06); stroke: var(--border); }
+  .graph-node.review circle { fill: rgba(168,85,247,0.15); stroke: #a855f7; }
+  .graph-node text { fill: var(--text-dim); font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+  .graph-edge { stroke: var(--border); stroke-width: 1.2; }
 
   #conv-header {
     display: flex; align-items: center; justify-content: space-between; padding: 4px 2px 14px;
@@ -197,6 +198,34 @@
   .session-summary-bubble .label {
     font-family: 'JetBrains Mono', monospace; font-size: 9.5px; color: var(--cyan);
     letter-spacing: 0.1em; margin-bottom: 6px; text-transform: uppercase;
+  }
+
+  #provider-modal-backdrop {
+    display: none; position: fixed; inset: 0; background: rgba(6,12,18,0.7);
+    z-index: 50; align-items: center; justify-content: center;
+  }
+  #provider-modal-backdrop.open { display: flex; }
+  #provider-modal {
+    width: 380px; max-width: 90vw; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 16px; padding: 24px; box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  }
+  #provider-modal .pm-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+  #provider-modal .pm-title { font-size: 17px; font-weight: 700; }
+  #provider-modal .pm-close { cursor: pointer; color: var(--text-dim); font-size: 20px; line-height: 1; padding: 4px; }
+  #provider-modal .pm-close:hover { color: var(--text); }
+  #provider-modal .pm-model {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim);
+    margin-bottom: 18px; word-break: break-all;
+  }
+  #provider-modal .pm-row {
+    display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 6px; font-size: 13px;
+  }
+  #provider-modal .pm-row .pm-label { color: var(--text-dim); }
+  #provider-modal .pm-row .pm-value { font-weight: 600; }
+  #provider-modal .pm-big { font-size: 28px; font-weight: 700; margin: 14px 0 6px; }
+  #provider-modal .pm-note {
+    margin-top: 16px; padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,0.03);
+    font-size: 11.5px; color: var(--text-dim); line-height: 1.5;
   }
 
   .placeholder-view {
@@ -279,7 +308,6 @@
 
 <div id="shell">
   <aside id="sidebar">
-    <div id="sidebar-toggle" title="Collapse sidebar">‹</div>
     <div id="logo">
       <div id="logo-orb"></div>
       <div>
@@ -325,6 +353,11 @@
         <div class="panel">
           <div class="panel-header"><h2>AI Core Overview</h2></div>
           <div class="grid grid-cols-3" id="cc-core-grid"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-header"><h2>Last Orchestration Run</h2></div>
+          <div id="cc-graph-empty" class="card-sub" style="padding:12px 4px">No orchestrator run yet -- ask Sandy something that needs "orchestrator mode" to see the task graph here.</div>
+          <svg id="cc-graph-svg" style="display:none; width:100%; height:auto;"></svg>
         </div>
         <div class="panel">
           <div class="panel-header"><h2>Active Capabilities</h2></div>
@@ -401,7 +434,31 @@
   </div>
 </div>
 
+<div id="provider-modal-backdrop">
+  <div id="provider-modal">
+    <div class="pm-header">
+      <div class="pm-title" id="pm-title">--</div>
+      <div class="pm-close" id="pm-close">&times;</div>
+    </div>
+    <div class="pm-model" id="pm-model">--</div>
+    <div class="pm-big" id="pm-big">--</div>
+    <div class="usage-bar-track"><div class="usage-bar-fill" id="pm-bar"></div></div>
+    <div style="margin-top:16px">
+      <div class="pm-row"><span class="pm-label">Role in Sandy</span><span class="pm-value" id="pm-role">--</span></div>
+      <div class="pm-row"><span class="pm-label">Calls used today</span><span class="pm-value" id="pm-used">--</span></div>
+      <div class="pm-row"><span class="pm-label">Daily cap</span><span class="pm-value" id="pm-cap">--</span></div>
+      <div class="pm-row"><span class="pm-label">Sandy's tracker resets</span><span class="pm-value" id="pm-resets">--</span></div>
+    </div>
+    <div class="pm-note" id="pm-note">--</div>
+  </div>
+</div>
+
 <script>
+  window.PROVIDER_META = {
+    groq: { role: "Fast tier + classifier calls", note: "Groq's own real rate limit is separate from Sandy's cap here and can hit first -- this shows Sandy's own tracker, not Groq's live account status." },
+    gemini: { role: "Quality tier + orchestrator", note: "Also Sandy's default answering model and the orchestrator's planner/reviewer." },
+    cerebras: { role: "Reasoning/volume tier", note: "gpt-oss-120b -- used for medium/complex tier answers and orchestrator sub-tasks." },
+  };
 (function () {
   const TOKEN_KEY = "sandy_hf_token";
   const SESSION_ID = "ruks-home";
@@ -662,23 +719,111 @@
     appendMessage("assistant", "Theek hai, cancel kar diya.", null, false);
   };
 
+  // ---------- Orchestration task graph ----------
+  function renderOrchestrationGraph(graph) {
+    const emptyEl = document.getElementById("cc-graph-empty");
+    const svg = document.getElementById("cc-graph-svg");
+    if (!graph || !graph.nodes || !graph.nodes.length) {
+      emptyEl.style.display = "block";
+      svg.style.display = "none";
+      return;
+    }
+    emptyEl.style.display = "none";
+    svg.style.display = "block";
+
+    // BFS depth from root -- reliable layered layout, no physics needed
+    const byId = {}; graph.nodes.forEach(n => byId[n.id] = n);
+    const children = {}; graph.edges.forEach(([a, b]) => (children[a] = children[a] || []).push(b));
+    const depth = { root: 0 };
+    const queue = ["root"];
+    while (queue.length) {
+      const id = queue.shift();
+      (children[id] || []).forEach(c => { if (!(c in depth)) { depth[c] = depth[id] + 1; queue.push(c); } });
+    }
+    const levels = {};
+    graph.nodes.forEach(n => { const d = depth[n.id] ?? 0; (levels[d] = levels[d] || []).push(n.id); });
+
+    const W = 640, rowH = 90, pad = 60;
+    const maxDepth = Math.max(...Object.keys(levels).map(Number));
+    const H = (maxDepth + 1) * rowH + pad;
+    const pos = {};
+    Object.entries(levels).forEach(([d, ids]) => {
+      const y = Number(d) * rowH + pad / 2;
+      ids.forEach((id, i) => { pos[id] = { x: (W / (ids.length + 1)) * (i + 1), y }; });
+    });
+
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    const edgeLines = graph.edges.map(([a, b]) => {
+      if (!pos[a] || !pos[b]) return "";
+      return `<line class="graph-edge" x1="${pos[a].x}" y1="${pos[a].y}" x2="${pos[b].x}" y2="${pos[b].y}"/>`;
+    }).join("");
+    const nodeEls = graph.nodes.map(n => {
+      const p = pos[n.id]; if (!p) return "";
+      const label = n.label.length > 22 ? n.label.slice(0, 20) + "…" : n.label;
+      return `<g class="graph-node ${n.type}" transform="translate(${p.x},${p.y})">
+        <title>${n.label}</title>
+        <circle r="${n.type === 'task' ? 10 : 7}"/>
+        <text x="0" y="${n.type === 'task' ? 24 : 20}" text-anchor="middle">${label}</text>
+      </g>`;
+    }).join("");
+    svg.innerHTML = edgeLines + nodeEls;
+  }
+
   document.getElementById("bb-send").addEventListener("click", handleSend);
   document.getElementById("bb-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); handleSend(); }
   });
 
-  // ---------- Collapsible sidebar ----------
-  const sidebarEl = document.getElementById("sidebar");
-  const sidebarToggle = document.getElementById("sidebar-toggle");
-  function setSidebarCollapsed(collapsed) {
-    sidebarEl.classList.toggle("collapsed", collapsed);
-    sidebarToggle.textContent = collapsed ? "›" : "‹";
-    localStorage.setItem("sandy-sidebar-collapsed", collapsed ? "1" : "0");
+  // ---------- Command Center: click a provider card for real detail ----------
+  const pmBackdrop = document.getElementById("provider-modal-backdrop");
+  function openProviderModal(provider) {
+    if (!lastStatus) return;
+    const meta = window.PROVIDER_META[provider] || {};
+    const cap = (lastStatus.config && lastStatus.config.caps || {})[provider];
+    const used = (lastStatus.usage && lastStatus.usage[provider]) || 0;
+    const model = (lastStatus.models || {})[provider] || "unknown";
+    document.getElementById("pm-title").textContent = provider.charAt(0).toUpperCase() + provider.slice(1);
+    document.getElementById("pm-model").textContent = model;
+    document.getElementById("pm-role").textContent = meta.role || "--";
+    document.getElementById("pm-used").textContent = used;
+    document.getElementById("pm-cap").textContent = cap == null ? "No cap set" : cap;
+    document.getElementById("pm-note").textContent = meta.note || "";
+    if (cap == null) {
+      document.getElementById("pm-big").textContent = `${used} calls today`;
+      document.getElementById("pm-bar").style.width = "0%";
+      document.getElementById("pm-resets").textContent = "No cap -- nothing to reset";
+    } else {
+      const pct = Math.min(100, (used / cap) * 100);
+      document.getElementById("pm-big").textContent = `${Math.round(pct)}% used`;
+      const bar = document.getElementById("pm-bar");
+      bar.style.width = pct + "%";
+      bar.className = "usage-bar-fill" + (pct >= 90 ? " red" : pct >= 70 ? " amber" : "");
+      // Sandy's own tracker resets at server local midnight -- an
+      // estimate of OUR cap, not the provider's actual account limit
+      // (which can hit first, as it did in the log Ruk pasted).
+      const now = new Date();
+      const midnight = new Date(now); midnight.setHours(24, 0, 0, 0);
+      const hrs = Math.floor((midnight - now) / 3600000);
+      const mins = Math.floor(((midnight - now) % 3600000) / 60000);
+      document.getElementById("pm-resets").textContent = `~${hrs}h ${mins}m (Sandy's tracker only)`;
+    }
+    pmBackdrop.classList.add("open");
   }
-  sidebarToggle.addEventListener("click", () => {
-    setSidebarCollapsed(!sidebarEl.classList.contains("collapsed"));
+  document.getElementById("pm-close").addEventListener("click", () => pmBackdrop.classList.remove("open"));
+  pmBackdrop.addEventListener("click", (e) => { if (e.target === pmBackdrop) pmBackdrop.classList.remove("open"); });
+  document.getElementById("cc-core-grid").addEventListener("click", (e) => {
+    const card = e.target.closest("[data-provider]");
+    if (card) openProviderModal(card.dataset.provider);
   });
-  setSidebarCollapsed(localStorage.getItem("sandy-sidebar-collapsed") === "1");
+
+  // ---------- Collapsible sidebar: hover to expand, collapses the moment
+  // the mouse leaves. Starts collapsed always (icon rail) -- no
+  // click-to-toggle, no persisted state, since "expand while I'm looking
+  // at it" doesn't need to remember anything across reloads.
+  const sidebarEl = document.getElementById("sidebar");
+  sidebarEl.classList.add("collapsed");
+  sidebarEl.addEventListener("mouseenter", () => sidebarEl.classList.remove("collapsed"));
+  sidebarEl.addEventListener("mouseleave", () => sidebarEl.classList.add("collapsed"));
 
   // ---------- New Chat: summarize since the last reset, clear the ----------
   // visible pane only. chat_log/Mem0 keep everything -- this is purely a
@@ -699,14 +844,18 @@
   });
 
   // ---------- Real status data (caps, memory facts, Hermes jobs) ----------
+  let lastStatus = null;
+
   async function fetchStatus() {
     try {
       const res = await fetch("/status", { headers: authHeaders() });
       if (!res.ok) return;
       const data = await res.json();
+      lastStatus = data;
       renderCaps(data.config, data.usage);
       renderMemory(data.memory_facts);
       renderWorkflows(data.jobs);
+      renderOrchestrationGraph(data.orchestration_graph);
     } catch (e) {
       console.warn("status fetch failed", e);
     }
