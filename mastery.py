@@ -59,20 +59,56 @@ def extract_mastery_request(message: str) -> dict | None:
     return data
 
 
-def explain_understanding(skill: str, days: int, hours_per_day: float) -> str:
-    """Before Ruk confirms a multi-day mastery mission, write out what
-    Sandy actually understood the goal to be and how she'll approach the
-    first session -- shown alongside the confirm prompt, so a
-    misunderstanding gets caught before days of unattended cron sessions
-    run on it, not after."""
+_pending_plans: dict[str, dict] = {}  # session_id -> {skill, days, hours_per_day, plan}
+
+
+def propose_plan(session_id: str, skill: str, days: int, hours_per_day: float, feedback: str | None = None) -> str:
+    """Full mastery plan document -- not just a one-liner. Before a
+    multi-day unattended cron mission starts, Ruk should see exactly
+    what Sandy understood, what she'll actually produce, how she'll go
+    about it, and a rough day-by-day shape -- concrete enough to catch
+    a misunderstanding before days of cron sessions run on it, not
+    after. Stored as the pending plan for this session -- a follow-up
+    message that isn't an approval gets treated as feedback and this
+    regenerates the whole document, not a patch to one line."""
+    prior = _pending_plans.get(session_id)
+    revision_note = ""
+    if feedback and prior:
+        revision_note = (
+            f"\n\nRuk already saw this earlier draft:\n{prior['plan']}\n\n"
+            f'He wants this changed: "{feedback}"\n'
+            "Rewrite the FULL plan incorporating that feedback -- don't just patch one line."
+        )
     prompt = (
-        f"Ruk asked you to master \"{skill}\" over {days} days, "
-        f"~{hours_per_day}h/day, roz ek session. In Hinglish, 4-6 sentences: "
-        "what do you understand the actual goal to be, and roughly how "
-        "will you approach the first session? Be concrete and specific to "
-        "this skill, not generic corporate-sounding filler."
+        f'Ruk asked Sandy to master "{skill}" over {days} days, ~{hours_per_day}h/day. '
+        "Write a full plan document, in Hinglish, covering ALL of these sections clearly "
+        "(use these as headers):\n"
+        "1. UNDERSTANDING -- what you understand the actual goal to be, in your own words\n"
+        "2. WHAT YOU'LL MAKE -- the concrete deliverable(s), specifically, not vague\n"
+        "3. PROCESS -- how you'll actually go about it: research first, then think through "
+        "approaches, then build/practice, then review and iterate -- concrete for THIS "
+        "specific skill, not generic corporate filler\n"
+        "4. DAY-BY-DAY -- a rough breakdown of what happens each of the " + str(days) + " days\n"
+        "5. TOOLS -- which of your real tools (web search, code execution) you'll actually use, and why"
+        + revision_note
     )
-    return call_llm_with_fallback("gemini", [_IDENTITY_MSG, {"role": "user", "content": prompt}])
+    plan = call_llm_with_fallback("gemini", [_IDENTITY_MSG, {"role": "user", "content": prompt}])
+    _pending_plans[session_id] = {"skill": skill, "days": days, "hours_per_day": hours_per_day, "plan": plan}
+    return plan
+
+
+def get_pending_plan(session_id: str) -> dict | None:
+    return _pending_plans.get(session_id)
+
+
+def confirm_plan(session_id: str) -> str:
+    """Ruk approved -- start the mission using the STORED params from
+    the plan he actually saw and confirmed, not re-parsed from whatever
+    his approval message happened to say."""
+    pending = _pending_plans.pop(session_id, None)
+    if not pending:
+        return "Ruk, koi pending plan nahi mila is session ke liye -- pehle naya mastery request bhejo."
+    return start_mastery(pending["skill"], pending["days"], pending["hours_per_day"])
 
 
 def start_mastery(skill: str, days: int, hours_per_day: int) -> str:
