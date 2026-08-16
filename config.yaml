@@ -1,0 +1,40 @@
+memory:
+  provider: sandy-memory
+
+# scode: CORRECTED -- the first fix here was wrong and caused a real
+# production failure (HTTP 400 "gemini/gemini-3.5-flash is not a valid
+# model ID" via OpenRouter). Root cause, verified against Hermes's real
+# source this time: resolve_requested_provider() falls through to "auto"
+# (which resolves to OpenRouter) unless a provider is explicitly given --
+# either per-job or here via model.provider. Without it, "auto" mode
+# interpreted "gemini/gemini-3.5-flash" as an OpenRouter aggregator slug
+# (OpenRouter's real convention, e.g. "google/gemini-2.5-flash") and
+# rejected it -- litellm's "provider/model" prefix convention (used
+# elsewhere in this repo, e.g. llm.py) is NOT the same thing as Hermes's
+# own provider resolution, which takes provider and model as SEPARATE
+# fields. provider: gemini here matches the named entry under
+# providers: below (confirmed real/supported key, "providers:" and the
+# legacy "custom_providers:" are both read by Hermes's own resolver);
+# default is the bare model name (no prefix) since provider routing is
+# now explicit -- same bare name litellm already sends to this exact
+# Google endpoint elsewhere in this repo, so not a new guess.
+model:
+  provider: gemini
+  default: gemini-3.5-flash
+
+providers:
+  groq:
+    name: groq
+    base_url: https://api.groq.com/openai/v1
+    key_env: GROQ_API_KEY
+  cerebras:
+    name: cerebras
+    base_url: https://api.cerebras.ai/v1
+    key_env: CEREBRAS_API_KEY
+  gemini:
+    name: gemini
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    key_env: GOOGLE_API_KEY
+
+cron:
+  output_dir: /root/.hermes/cron/output

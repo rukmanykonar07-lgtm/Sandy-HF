@@ -1,0 +1,1195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Ruk's Home</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#0A0E1A">
+<link rel="icon" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0A0E1A;
+    --panel: #0F1729;
+    --card: #131B2E;
+    --card-hover: #182238;
+    --border: #1E2A42;
+    --cyan: #22D3EE;
+    --cyan-dim: rgba(34, 211, 238, 0.15);
+    --sandy-1: #FF6B5B;
+    --sandy-2: #FF3D81;
+    --text: #E2E8F0;
+    --text-dim: #64748B;
+    --text-faint: #3E4C64;
+    --green: #10B981;
+    --amber: #F59E0B;
+    --red: #EF4444;
+    --purple: #A78BFA;
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+    overscroll-behavior: none; font-size: 14px;
+  }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  #shell { display: flex; height: 100vh; height: 100dvh; }
+
+  /* ---------- Sidebar ---------- */
+  #sidebar {
+    width: 220px; flex: 0 0 auto; background: var(--panel); position: relative;
+    border-right: 1px solid var(--border); display: flex; flex-direction: column;
+    padding: 18px 14px; transition: width 0.15s ease, padding 0.15s ease;
+  }
+  #sidebar.collapsed { width: 60px; padding: 18px 8px; }
+  #sidebar.collapsed #logo { justify-content: center; padding: 4px 0 20px; }
+  #sidebar.collapsed #logo-text, #sidebar.collapsed #logo-sub,
+  #sidebar.collapsed .nav-item span, #sidebar.collapsed #sidebar-orb-status .label,
+  #sidebar.collapsed #sidebar-orb-status .status-text { display: none; }
+  #sidebar.collapsed .nav-item { justify-content: center; }
+  #sidebar.collapsed #sidebar-orb-status { padding: 10px 4px; }
+  #logo { display: flex; align-items: center; gap: 10px; padding: 4px 6px 20px; }
+  #logo-orb {
+    width: 32px; height: 32px; border-radius: 50%; flex: 0 0 auto;
+    background: radial-gradient(circle at 34% 30%, var(--sandy-1), var(--sandy-2) 70%);
+    box-shadow: 0 0 16px -2px rgba(255, 61, 129, 0.6);
+    animation: breathe 4.2s ease-in-out infinite;
+  }
+  #logo-text { font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 17px; letter-spacing: 0.04em; line-height: 1.1; }
+  #logo-sub { font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--text-dim); letter-spacing: 0.12em; }
+
+  nav { display: flex; flex-direction: column; gap: 2px; flex: 1; overflow-y: auto; }
+  .nav-item {
+    display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 8px;
+    color: var(--text-dim); font-size: 13.5px; font-weight: 500; cursor: pointer;
+    border: 1px solid transparent; transition: background 0.12s, color 0.12s;
+  }
+  .nav-item:hover { background: var(--card); color: var(--text); }
+  .nav-item.active { background: var(--cyan-dim); color: var(--cyan); border-color: rgba(34,211,238,0.25); }
+  .nav-item svg { width: 16px; height: 16px; flex: 0 0 auto; }
+
+  #sidebar-orb-status {
+    margin-top: 14px; padding: 14px 12px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; text-align: center;
+  }
+  #sidebar-orb-status .label {
+    font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--cyan);
+    letter-spacing: 0.12em; text-align: left; margin-bottom: 8px;
+  }
+  #mini-orb-wrap { width: 44px; height: 44px; margin: 6px auto; position: relative; }
+  #mini-orb {
+    position: absolute; inset: 0; border-radius: 50%;
+    background: radial-gradient(circle at 34% 30%, var(--sandy-1), var(--sandy-2) 70%);
+    box-shadow: 0 0 20px -3px rgba(255, 61, 129, 0.55);
+    animation: breathe 4.2s ease-in-out infinite;
+  }
+  #mini-orb.thinking { animation: pulse-thinking 0.9s ease-in-out infinite; }
+  #mini-orb.speaking { animation: pulse-speaking 0.45s ease-in-out infinite; }
+  #sidebar-orb-status .status-text { font-size: 11.5px; color: var(--text-dim); margin-top: 4px; }
+
+  @keyframes breathe {
+    0%, 100% { transform: scale(0.94); } 50% { transform: scale(1.03); }
+  }
+  @keyframes pulse-thinking { 0%, 100% { transform: scale(0.9); } 50% { transform: scale(1.06); } }
+  @keyframes pulse-speaking { 0%, 100% { transform: scale(0.96) rotate(0deg); } 50% { transform: scale(1.09) rotate(4deg); } }
+
+  /* ---------- Main column ---------- */
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+  #topbar {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 16px;
+    padding: 14px 24px; border-bottom: 1px solid var(--border); background: var(--panel);
+  }
+  .status-pill {
+    display: flex; align-items: center; gap: 7px; padding: 6px 12px; border-radius: 20px;
+    background: var(--card); border: 1px solid var(--border); font-size: 12px; font-weight: 600;
+    white-space: nowrap;
+  }
+  .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); }
+  #topbar-clock-wrap { text-align: center; flex: 0 0 auto; }
+  #topbar-date { font-size: 10.5px; color: var(--text-dim); }
+  #topbar-time { font-family: 'JetBrains Mono', monospace; font-size: 17px; font-weight: 700; color: var(--cyan); }
+  #topbar-search {
+    flex: 1; background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 14px; color: var(--text-dim); font-size: 13px;
+  }
+  .model-select {
+    background: var(--card); border: 1px solid var(--border); color: var(--text); border-radius: 8px;
+    padding: 8px 12px; font-size: 12.5px; font-family: 'JetBrains Mono', monospace;
+  }
+  #topbar-profile {
+    display: flex; align-items: center; gap: 8px; padding: 6px 12px 6px 6px; border-radius: 20px;
+    background: var(--card); border: 1px solid var(--border); white-space: nowrap;
+  }
+  #topbar-profile .avatar {
+    width: 26px; height: 26px; border-radius: 50%; background: linear-gradient(135deg, var(--sandy-1), var(--sandy-2));
+    display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 11px; color: #1a0509;
+  }
+  #topbar-profile .name { font-size: 12px; font-weight: 600; }
+  #topbar-profile .role { font-size: 9.5px; color: var(--text-dim); }
+
+  /* ---------- Content ---------- */
+  #content { flex: 1; overflow-y: auto; padding: 22px 24px; }
+  .view { display: none; }
+  .view.active { display: block; }
+
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px 20px; margin-bottom: 18px;
+  }
+  .panel-header {
+    display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;
+  }
+  .panel-header h2 { font-family: 'Space Grotesk', sans-serif; font-size: 15px; font-weight: 700; margin: 0; }
+  .panel-header .count { font-size: 12px; color: var(--text-dim); }
+
+  .grid { display: grid; gap: 12px; }
+  .grid-cols-3 { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+  }
+  .card-title { font-size: 13.5px; font-weight: 600; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+  .card-sub { font-size: 11.5px; color: var(--text-dim); }
+  .badge {
+    font-family: 'JetBrains Mono', monospace; font-size: 9.5px; padding: 2px 7px; border-radius: 6px;
+    font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; white-space: nowrap;
+  }
+  .badge-green { background: rgba(16,185,129,0.15); color: var(--green); }
+  .badge-amber { background: rgba(245,158,11,0.15); color: var(--amber); }
+  .badge-red { background: rgba(239,68,68,0.15); color: var(--red); }
+  .badge-cyan { background: var(--cyan-dim); color: var(--cyan); }
+
+  .usage-bar-track { height: 5px; border-radius: 3px; background: var(--border); margin-top: 8px; overflow: hidden; }
+  .usage-bar-fill { height: 100%; border-radius: 3px; background: var(--green); transition: width 0.2s ease; }
+  .usage-bar-fill.amber { background: var(--amber); }
+  .usage-bar-fill.red { background: var(--red); }
+  #cc-core-grid [data-provider] { cursor: pointer; transition: border-color 0.15s ease; }
+  #cc-core-grid [data-provider]:hover { border-color: var(--cyan); }
+  .graph-node circle { stroke-width: 2; cursor: default; }
+  .graph-node.task circle { fill: var(--cyan-dim); stroke: var(--cyan); }
+  .graph-node.subtask circle { fill: rgba(255,255,255,0.06); stroke: var(--border); }
+  .graph-node.review circle { fill: rgba(168,85,247,0.15); stroke: #a855f7; }
+  .graph-node text { fill: var(--text-dim); font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+  .graph-edge { stroke: var(--border); stroke-width: 1.2; }
+
+  #conv-header {
+    display: flex; align-items: center; justify-content: space-between; padding: 4px 2px 14px;
+  }
+  #conv-header h2 { font-size: 15px; font-weight: 600; }
+  #new-chat-btn {
+    display: flex; align-items: center; gap: 6px; padding: 7px 13px; border-radius: 8px;
+    background: var(--card); border: 1px solid var(--border); color: var(--text); font-size: 12.5px;
+    font-weight: 600; cursor: pointer;
+  }
+  #new-chat-btn:hover { border-color: var(--cyan); color: var(--cyan); }
+  .session-summary-bubble {
+    background: var(--cyan-dim); border: 1px solid rgba(34,211,238,0.25); border-radius: 12px;
+    padding: 12px 16px; font-size: 12.5px; color: var(--text); white-space: pre-wrap; margin-bottom: 10px;
+  }
+  .session-summary-bubble .label {
+    font-family: 'JetBrains Mono', monospace; font-size: 9.5px; color: var(--cyan);
+    letter-spacing: 0.1em; margin-bottom: 6px; text-transform: uppercase;
+  }
+
+  #provider-modal-backdrop {
+    display: none; position: fixed; inset: 0; background: rgba(6,12,18,0.7);
+    z-index: 50; align-items: center; justify-content: center;
+  }
+  #provider-modal-backdrop.open { display: flex; }
+  #provider-modal {
+    width: 380px; max-width: 90vw; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 16px; padding: 24px; box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  }
+  #provider-modal .pm-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+  #provider-modal .pm-title { font-size: 17px; font-weight: 700; }
+  #provider-modal .pm-close { cursor: pointer; color: var(--text-dim); font-size: 20px; line-height: 1; padding: 4px; }
+  #provider-modal .pm-close:hover { color: var(--text); }
+  #provider-modal .pm-model {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim);
+    margin-bottom: 18px; word-break: break-all;
+  }
+  #provider-modal .pm-row {
+    display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 6px; font-size: 13px;
+  }
+  #provider-modal .pm-row .pm-label { color: var(--text-dim); }
+  #provider-modal .pm-row .pm-value { font-weight: 600; }
+  #provider-modal .pm-big { font-size: 28px; font-weight: 700; margin: 14px 0 6px; }
+  #provider-modal .pm-note {
+    margin-top: 16px; padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,0.03);
+    font-size: 11.5px; color: var(--text-dim); line-height: 1.5;
+  }
+
+  .placeholder-view {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    min-height: 50vh; text-align: center; color: var(--text-dim);
+  }
+  .placeholder-view .icon { width: 40px; height: 40px; margin-bottom: 14px; opacity: 0.4; }
+  .placeholder-view .icon svg { width: 100%; height: 100%; stroke: var(--text-dim); }
+  .placeholder-view h2 { font-family: 'Space Grotesk', sans-serif; color: var(--text); margin: 0 0 6px; }
+  .placeholder-view p { font-size: 13px; max-width: 380px; line-height: 1.5; }
+
+  /* ---------- Conversations view ---------- */
+  #conv-log { display: flex; flex-direction: column; gap: 12px; padding-bottom: 8px; }
+  .msg-row { display: flex; flex-direction: column; max-width: 70%; }
+  .msg-row.user { align-self: flex-end; align-items: flex-end; }
+  .msg-row.assistant { align-self: flex-start; align-items: flex-start; }
+  .msg-bubble { padding: 10px 14px; border-radius: 14px; font-size: 14px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+  .msg-row.user .msg-bubble { background: var(--cyan-dim); border: 1px solid rgba(34,211,238,0.3); border-bottom-right-radius: 4px; }
+  .msg-row.assistant .msg-bubble {
+    background: linear-gradient(135deg, rgba(255,107,91,0.14), rgba(255,61,129,0.14));
+    border: 1px solid rgba(255,61,129,0.25); border-bottom-left-radius: 4px;
+  }
+  .msg-time { font-family: 'JetBrains Mono', monospace; font-size: 9.5px; color: var(--text-faint); margin-top: 3px; padding: 0 4px; }
+  .approval-actions { display: flex; gap: 8px; margin-top: 8px; }
+  .approval-actions button { font-size: 12.5px; font-weight: 600; border: none; border-radius: 8px; padding: 6px 13px; cursor: pointer; }
+  .btn-confirm { background: var(--cyan); color: #062024; }
+  .btn-cancel { background: var(--card-hover); color: var(--text-dim); border: 1px solid var(--border) !important; }
+
+  /* ---------- Bottom voice bar ---------- */
+  #bottombar {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 18px; padding: 12px 24px;
+    border-top: 1px solid var(--border); background: var(--panel);
+  }
+  .bb-stat { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-dim); white-space: nowrap; }
+  #bb-center {
+    flex: 1; max-width: 560px; margin: 0 auto; display: flex; align-items: center; gap: 12px;
+    background: var(--card); border: 1px solid rgba(34,211,238,0.35); border-radius: 24px; padding: 8px 10px 8px 18px;
+    box-shadow: 0 0 22px -8px rgba(34,211,238,0.4);
+  }
+  #bb-orb-wrap { width: 28px; height: 28px; flex: 0 0 auto; position: relative; }
+  #bb-orb {
+    position: absolute; inset: 0; border-radius: 50%;
+    background: radial-gradient(circle at 34% 30%, var(--sandy-1), var(--sandy-2) 70%);
+    animation: breathe 4.2s ease-in-out infinite;
+  }
+  #bb-orb.thinking { animation: pulse-thinking 0.9s ease-in-out infinite; }
+  #bb-orb.speaking { animation: pulse-speaking 0.45s ease-in-out infinite; }
+  #bb-input {
+    flex: 1; background: transparent; border: none; color: var(--text); font-size: 13.5px;
+    font-family: inherit; outline: none;
+  }
+  #bb-input::placeholder { color: var(--text-dim); }
+  #bb-send {
+    background: linear-gradient(135deg, var(--sandy-1), var(--sandy-2)); color: #1a0509; border: none;
+    border-radius: 18px; padding: 7px 16px; font-weight: 700; font-family: 'Space Grotesk', sans-serif;
+    cursor: pointer; font-size: 12.5px;
+  }
+  #bb-send:disabled { opacity: 0.5; cursor: default; }
+
+  /* ---------- Token modal ---------- */
+  #token-modal { position: fixed; inset: 0; background: rgba(10,14,26,0.94); display: flex; align-items: center; justify-content: center; padding: 24px; z-index: 50; }
+  #token-modal.hidden { display: none; }
+  #token-card { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 24px; max-width: 380px; width: 100%; }
+  #token-card h2 { font-family: 'Space Grotesk', sans-serif; font-size: 17px; margin: 0 0 8px; }
+  #token-card p { font-size: 13px; color: var(--text-dim); line-height: 1.5; margin: 0 0 16px; }
+  #token-input { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 10px 12px; font-family: 'JetBrains Mono', monospace; font-size: 13px; margin-bottom: 12px; }
+  #token-save { width: 100%; background: linear-gradient(135deg, var(--sandy-1), var(--sandy-2)); color: #1a0509; border: none; border-radius: 8px; padding: 11px; font-weight: 700; font-family: 'Space Grotesk', sans-serif; cursor: pointer; }
+
+  @media (max-width: 860px) {
+    #sidebar { display: none; }
+    #topbar-search, .model-select { display: none; }
+    .msg-row { max-width: 88%; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #logo-orb, #mini-orb, #bb-orb { animation: none; }
+  }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+</head>
+<body>
+
+<div id="shell">
+  <aside id="sidebar">
+    <div id="logo">
+      <div id="logo-orb"></div>
+      <div>
+        <div id="logo-text">SANDY</div>
+        <div id="logo-sub">RUK'S HOME</div>
+      </div>
+    </div>
+    <nav id="nav-list"></nav>
+    <div id="sidebar-orb-status">
+      <div class="label">SANDY STATUS</div>
+      <div id="mini-orb-wrap"><div id="mini-orb"></div></div>
+      <div class="status-text" id="mini-status-text">idle</div>
+    </div>
+  </aside>
+
+  <div id="main">
+    <div id="topbar">
+      <div class="status-pill"><span class="status-dot"></span> SYSTEM OPTIMAL</div>
+      <div id="topbar-clock-wrap">
+        <div id="topbar-date"></div>
+        <div id="topbar-time"></div>
+      </div>
+      <div id="topbar-search">Search…</div>
+      <select class="model-select" id="model-select">
+        <option value="">Auto (Sandy decides)</option>
+        <option value="groq">Groq only</option>
+        <option value="gemini">Gemini only</option>
+        <option value="cerebras">Cerebras only</option>
+        <option value="orchestrator">Orchestrator (all + loop)</option>
+      </select>
+      <div id="topbar-profile">
+        <div class="avatar">R</div>
+        <div>
+          <div class="name">Ruk</div>
+          <div class="role">Operator</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="content">
+      <!-- Command Center -->
+      <section class="view active" id="view-command-center">
+        <div class="panel">
+          <div class="panel-header"><h2>AI Core Overview</h2></div>
+          <div class="grid grid-cols-3" id="cc-core-grid"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-header"><h2>Last Orchestration Run</h2></div>
+          <div id="cc-graph-empty" class="card-sub" style="padding:12px 4px">No orchestrator run yet -- ask Sandy something that needs "orchestrator mode" to see the task graph here.</div>
+          <svg id="cc-graph-svg" style="display:none; width:100%; height:auto;"></svg>
+        </div>
+        <div class="panel">
+          <div class="panel-header"><h2>Active Capabilities</h2></div>
+          <div class="grid grid-cols-3" id="cc-cap-grid"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-header"><h2>Quick Commands</h2></div>
+          <div class="grid grid-cols-3" id="cc-quick-grid"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-header"><h2>Mastery Jobs</h2><span class="count" id="cc-jobs-count"></span></div>
+          <div id="cc-jobs-summary"></div>
+        </div>
+      </section>
+
+      <!-- Conversations (real chat) -->
+      <section class="view" id="view-conversations">
+        <div id="conv-header">
+          <h2>Conversations</h2>
+          <div id="new-chat-btn">+ New Chat</div>
+        </div>
+        <div id="conv-log"></div>
+      </section>
+
+      <!-- Tools & Skills -->
+      <section class="view" id="view-tools">
+        <div class="panel">
+          <div class="panel-header"><h2>Tools &amp; Skills</h2><span class="count" id="tools-count"></span></div>
+          <div class="grid grid-cols-3" id="tools-grid"></div>
+        </div>
+      </section>
+
+      <!-- Memory (real Mem0 facts) -->
+      <section class="view" id="view-memory">
+        <div class="panel">
+          <div class="panel-header"><h2>Memory</h2><span class="count" id="memory-count"></span></div>
+          <div id="memory-list"></div>
+        </div>
+      </section>
+
+      <!-- Placeholder views -->
+      <section class="view" id="view-ai-core"></section>
+      <section class="view" id="view-agents">
+        <div class="panel">
+          <div class="panel-header"><h2>Mastery Comparison</h2></div>
+          <div class="card-sub" style="padding:4px 4px 12px">My mastery (Sandy's own orchestration) vs Hermes mastery, on the same skill -- real events only, nothing narrated. Click a node for detail; ask about the graph below it.</div>
+          <div class="grid grid-cols-3" style="margin-bottom:10px">
+            <select id="graph-run-picker" style="grid-column: span 3; padding:8px; border-radius:8px;"></select>
+          </div>
+          <div class="grid grid-cols-2" id="graph-panels">
+            <div class="card" style="min-height:340px">
+              <div class="card-title">My mastery (native)</div>
+              <svg id="graph-svg-sandy" width="100%" height="300" style="background:#0b0f19;border-radius:8px"></svg>
+            </div>
+            <div class="card" style="min-height:340px">
+              <div class="card-title">Hermes mastery</div>
+              <svg id="graph-svg-hermes" width="100%" height="300" style="background:#0b0f19;border-radius:8px"></svg>
+            </div>
+          </div>
+          <div class="card" id="graph-node-detail" style="margin-top:10px;display:none">
+            <div class="card-title">Node detail</div>
+            <div class="card-sub" id="graph-node-detail-body" style="white-space:pre-wrap"></div>
+          </div>
+          <div class="card" id="graph-output-panel" style="margin-top:10px;display:none">
+            <div class="card-title">Final output</div>
+            <div class="card-sub" id="graph-output-body" style="white-space:pre-wrap"></div>
+          </div>
+          <div class="card" style="margin-top:10px">
+            <div class="card-title">Ask about this graph</div>
+            <div style="display:flex;gap:8px;margin-top:6px">
+              <input id="graph-chat-input" placeholder="e.g. why did round 2 have a conflict?" style="flex:1;padding:8px;border-radius:8px" />
+              <button id="graph-chat-send" class="nav-item" style="padding:8px 16px">Ask</button>
+            </div>
+            <div class="card-sub" id="graph-chat-answer" style="margin-top:8px;white-space:pre-wrap"></div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-header"><h2>Agents</h2><span class="count" id="agents-count"></span></div>
+          <div class="card-sub" style="padding:4px 4px 12px">What Sandy's mastery jobs have actually produced -- real output from Hermes, read from disk per job, not narrated. A job shows up here once it's had at least one real run.</div>
+          <div id="agents-list"></div>
+        </div>
+      </section>
+      <section class="view" id="view-tasks"></section>
+      <section class="view" id="view-calendar"></section>
+      <section class="view" id="view-knowledge-base"></section>
+
+      <!-- Workflows (real Hermes cron jobs) -->
+      <section class="view" id="view-workflows">
+        <div class="panel">
+          <div class="panel-header"><h2>Workflows</h2><span class="count" id="workflows-count"></span></div>
+          <div id="workflows-list"></div>
+        </div>
+      </section>
+
+      <section class="view" id="view-settings"></section>
+    </div>
+
+    <div id="bottombar">
+      <div class="bb-stat">Mumbai, IN</div>
+      <div class="bb-stat">Connected</div>
+      <div id="bb-center">
+        <div id="bb-orb-wrap"><div id="bb-orb"></div></div>
+        <input id="bb-input" type="text" placeholder="Talk to Sandy — type a message…">
+        <button id="bb-send">Send</button>
+      </div>
+      <div class="bb-stat" id="bb-time-right"></div>
+    </div>
+  </div>
+</div>
+
+<div id="token-modal" class="hidden">
+  <div id="token-card">
+    <h2>Connect to Sandy</h2>
+    <p>Ruk's Home talks to your private Space, so it needs your Hugging Face access token once. It's saved only on this device.</p>
+    <input id="token-input" type="password" placeholder="hf_...">
+    <button id="token-save">Save &amp; connect</button>
+  </div>
+</div>
+
+<div id="provider-modal-backdrop">
+  <div id="provider-modal">
+    <div class="pm-header">
+      <div class="pm-title" id="pm-title">--</div>
+      <div class="pm-close" id="pm-close">&times;</div>
+    </div>
+    <div class="pm-model" id="pm-model">--</div>
+    <div class="pm-big" id="pm-big">--</div>
+    <div class="usage-bar-track"><div class="usage-bar-fill" id="pm-bar"></div></div>
+    <div style="margin-top:16px">
+      <div class="pm-row"><span class="pm-label">Role in Sandy</span><span class="pm-value" id="pm-role">--</span></div>
+      <div class="pm-row"><span class="pm-label">Calls used today</span><span class="pm-value" id="pm-used">--</span></div>
+      <div class="pm-row"><span class="pm-label">Daily cap</span><span class="pm-value" id="pm-cap">--</span></div>
+      <div class="pm-row"><span class="pm-label">Sandy's tracker resets</span><span class="pm-value" id="pm-resets">--</span></div>
+    </div>
+    <div class="pm-note" id="pm-note">--</div>
+  </div>
+</div>
+
+<script>
+  window.PROVIDER_META = {
+    groq: { role: "Fast tier + classifier calls", note: "Groq's own real rate limit is separate from Sandy's cap here and can hit first -- this shows Sandy's own tracker, not Groq's live account status." },
+    gemini: { role: "Quality tier + orchestrator", note: "Also Sandy's default answering model and the orchestrator's planner/reviewer." },
+    cerebras: { role: "Reasoning/volume tier", note: "gpt-oss-120b -- used for medium/complex tier answers and orchestrator sub-tasks." },
+  };
+(function () {
+  const TOKEN_KEY = "sandy_hf_token";
+  const SESSION_ID = "ruks-home";
+
+  const ICONS = {
+    grid: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>',
+    core: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></svg>',
+    agents: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M8 8V5a4 4 0 0 1 8 0v3M9 13v2M15 13v2"/></svg>',
+    tasks: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3 8-8"/><path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/></svg>',
+    calendar: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/></svg>',
+    memory: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5a2 2 0 0 1 2-2h9l5 5v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M9 9h6M9 13h6M9 17h3"/></svg>',
+    conv: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>',
+    kb: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>',
+    tools: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a4 4 0 1 1-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 1 1 5.4-5.4l3-3-3-3z"/></svg>',
+    workflows: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="12" r="3"/><path d="M6 9v6M8.5 7.5L15.5 10.5M8.5 16.5L15.5 13.5"/></svg>',
+    settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
+  };
+
+  const NAV = [
+    { id: "command-center", label: "Command Center", icon: "grid" },
+    { id: "ai-core", label: "AI Core", icon: "core" },
+    { id: "agents", label: "Agents", icon: "agents" },
+    { id: "tasks", label: "Tasks", icon: "tasks" },
+    { id: "calendar", label: "Calendar", icon: "calendar" },
+    { id: "memory", label: "Memory", icon: "memory" },
+    { id: "conversations", label: "Conversations", icon: "conv" },
+    { id: "knowledge-base", label: "Knowledge Base", icon: "kb" },
+    { id: "tools", label: "Tools & Skills", icon: "tools" },
+    { id: "workflows", label: "Workflows", icon: "workflows" },
+    { id: "settings", label: "Settings", icon: "settings" },
+  ];
+
+  const PLACEHOLDER_COPY = {
+    "ai-core": "Live provider health, routing tier breakdown, and orchestrator activity will render here once wired to real telemetry.",
+    "tasks": "No task-tracking system exists yet. Reserved for if/when Sandy gets a real task board.",
+    "calendar": "Not connected to anything yet — reserved for a future calendar integration.",
+    "knowledge-base": "Reserved for a future document/knowledge store. Nothing built here yet.",
+    "settings": "Provider keys are managed via HF Space secrets for now, not in-app. Reserved for if that ever needs to move here.",
+  };
+
+  const navListEl = document.getElementById("nav-list");
+  NAV.forEach((item) => {
+    const el = document.createElement("div");
+    el.className = "nav-item" + (item.id === "command-center" ? " active" : "");
+    el.dataset.view = item.id;
+    el.innerHTML = `${ICONS[item.icon]}<span>${item.label}</span>`;
+    el.addEventListener("click", () => showView(item.id));
+    navListEl.appendChild(el);
+  });
+
+  Object.entries(PLACEHOLDER_COPY).forEach(([id, copy]) => {
+    const section = document.getElementById("view-" + id);
+    const navItem = NAV.find((n) => n.id === id);
+    if (section) {
+      section.innerHTML = `<div class="placeholder-view"><div class="icon">${ICONS[navItem.icon]}</div><h2>${navItem.label}</h2><p>${copy}</p></div>`;
+    }
+  });
+
+  function showView(id) {
+    document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
+    document.querySelectorAll(".nav-item").forEach((n) => n.classList.remove("active"));
+    document.getElementById("view-" + id).classList.add("active");
+    document.querySelector(`.nav-item[data-view="${id}"]`).classList.add("active");
+    if (id === "agents") loadRunPicker();  // real data, loaded on demand not on every /status poll
+  }
+  window.sandyShowView = showView;
+
+  // ---------- Command Center content (Sandy-real categories, not the reference's fake tools) ----------
+  document.getElementById("cc-core-grid").innerHTML = [
+    ["Groq", "groq", "Configured", "green", "Fast tier, primary classifier calls"],
+    ["Gemini", "gemini", "Configured", "green", "Quality tier + orchestrator"],
+    ["Cerebras", "cerebras", "Configured", "green", "gpt-oss-120b, reasoning/volume tier"],
+    ["Memory (Mem0)", "", "Ready", "green", "Supabase pgvector, auto fact extraction"],
+    ["Chat Log", "", "Ready", "green", "Verbatim history for Ruk's Home"],
+    ["Hermes Gateway", "", "Running", "green", "Background cron + mastery sessions"],
+  ].map(([name, provider, status, color, sub]) => `
+    <div class="card"${provider ? ` data-provider="${provider}"` : ""}>
+      <div class="card-title">${name}<span class="badge badge-${color}">${status}</span></div>
+      <div class="card-sub">${sub}</div>
+      ${provider ? `<div class="usage-bar-track" style="display:none"><div class="usage-bar-fill"></div></div>` : ""}
+    </div>`).join("");
+
+  document.getElementById("cc-cap-grid").innerHTML = [
+    ["Chat + LLM routing", "Active"],
+    ["Self-modification (approval-gated)", "Active"],
+    ["Skill mastery (Hermes cron)", "Active"],
+    ["Codebase analysis (read-only)", "Active"],
+    ["Config changes via chat", "Active"],
+    ["Voice (Kokoro/Whisper)", "Not built yet"],
+  ].map(([name, status]) => `
+    <div class="card">
+      <div class="card-title">${name}<span class="badge ${status === "Active" ? "badge-cyan" : "badge-amber"}">${status}</span></div>
+    </div>`).join("");
+
+  const QUICK_COMMANDS = [
+    "set gemini cap to 100",
+    "what can you not do yet?",
+    "scan your whole codebase and report problems",
+  ];
+  document.getElementById("cc-quick-grid").innerHTML = QUICK_COMMANDS.map((cmd) => `
+    <div class="card" style="cursor:pointer" data-quick="${cmd}">
+      <div class="card-title">▷ ${cmd}</div>
+    </div>`).join("");
+  document.querySelectorAll("[data-quick]").forEach((el) => {
+    el.addEventListener("click", () => {
+      document.getElementById("bb-input").value = el.dataset.quick;
+      showView("conversations");
+      handleSend();
+    });
+  });
+
+  // ---------- Tools & Skills content ----------
+  const TOOLS = [
+    ["chat", "Operational", "green", "LLM routing (groq/gemini/cerebras)"],
+    ["memory", "Operational", "green", "Mem0 auto fact extraction"],
+    ["chatlog", "Operational", "green", "Verbatim history"],
+    ["selfmod", "Operational", "green", "Edit / history / rollback, approval-gated"],
+    ["mastery", "Operational", "green", "Hermes cron skill-building"],
+    ["codebase", "Operational", "green", "Read-only whole-repo analysis"],
+    ["config", "Operational", "green", "Live caps + preferences via chat"],
+    ["groq", "Connected", "green", ""],
+    ["gemini", "Connected", "green", ""],
+    ["cerebras", "Connected", "green", "gpt-oss-120b"],
+  ];
+  document.getElementById("tools-count").textContent = TOOLS.length + " tools";
+  document.getElementById("tools-grid").innerHTML = TOOLS.map(([name, status, color, sub]) => `
+    <div class="card">
+      <div class="card-title">${name}<span class="badge badge-${color}">${status}</span></div>
+      ${sub ? `<div class="card-sub">${sub}</div>` : ""}
+    </div>`).join("");
+
+  // ---------- Clock ----------
+  function tick() {
+    const now = new Date();
+    document.getElementById("topbar-date").textContent = now.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+    document.getElementById("topbar-time").textContent = now.toLocaleTimeString();
+    document.getElementById("bb-time-right").textContent = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+  tick();
+  setInterval(tick, 1000);
+
+  // ---------- Orb state (shared: mini sidebar orb + bottom bar orb) ----------
+  function setOrbState(state) {
+    ["mini-orb", "bb-orb"].forEach((id) => {
+      const el = document.getElementById(id);
+      el.classList.remove("thinking", "speaking");
+      if (state === "thinking") el.classList.add("thinking");
+      if (state === "speaking") el.classList.add("speaking");
+    });
+    document.getElementById("mini-status-text").textContent = state;
+  }
+
+  // ---------- Auth ----------
+  const tokenModal = document.getElementById("token-modal");
+  function getToken() { return localStorage.getItem(TOKEN_KEY); }
+  function authHeaders() { const t = getToken(); return t ? { Authorization: "Bearer " + t } : {}; }
+  function ensureToken() {
+    if (!getToken()) { tokenModal.classList.remove("hidden"); return false; }
+    return true;
+  }
+  document.getElementById("token-save").addEventListener("click", () => {
+    const val = document.getElementById("token-input").value.trim();
+    if (!val) return;
+    localStorage.setItem(TOKEN_KEY, val);
+    tokenModal.classList.add("hidden");
+    loadHistory();
+    fetchStatus();
+  });
+
+  // ---------- Conversations rendering ----------
+  const convLog = document.getElementById("conv-log");
+  let pending = null;
+
+  function fmtTime(iso) {
+    try { return (iso ? new Date(iso) : new Date()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+    catch (e) { return ""; }
+  }
+
+  function appendMessage(role, text, timestamp, needsApproval) {
+    const row = document.createElement("div");
+    row.className = "msg-row " + (role === "user" ? "user" : "assistant");
+    const bubble = document.createElement("div");
+    bubble.className = "msg-bubble";
+    bubble.textContent = text;
+    row.appendChild(bubble);
+    const ts = document.createElement("div");
+    ts.className = "msg-time";
+    ts.textContent = fmtTime(timestamp);
+    row.appendChild(ts);
+    if (needsApproval) {
+      const actions = document.createElement("div");
+      actions.className = "approval-actions";
+      const c = document.createElement("button");
+      c.className = "btn-confirm"; c.textContent = "Confirm";
+      c.addEventListener("click", () => window.sandyConfirmPending());
+      const x = document.createElement("button");
+      x.className = "btn-cancel"; x.textContent = "Cancel";
+      x.addEventListener("click", () => window.sandyCancelPending());
+      actions.appendChild(c); actions.appendChild(x);
+      row.appendChild(actions);
+    }
+    convLog.appendChild(row);
+    convLog.scrollTop = convLog.scrollHeight;
+  }
+
+  async function loadHistory() {
+    try {
+      const res = await fetch("/history", { headers: authHeaders() });
+      if (!res.ok) return;
+      const data = await res.json();
+      convLog.innerHTML = "";
+      (data.messages || []).forEach((m) => appendMessage(m.role, m.message, m.created_at, false));
+    } catch (e) { console.warn("history load failed", e); }
+  }
+
+  async function sendToSandy(message, approved) {
+    setOrbState("thinking");
+    document.getElementById("bb-send").disabled = true;
+    const modelChoice = document.getElementById("model-select").value;
+    const body = { message, session_id: SESSION_ID, approved: !!approved };
+    if (modelChoice) body.override_llms = [modelChoice];
+    try {
+      const res = await fetch("/chat", {
+        method: "POST",
+        headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      setOrbState("speaking");
+      appendMessage("assistant", data.reply, null, !!data.needs_approval);
+      pending = data.needs_approval ? { message } : null;
+      setTimeout(() => setOrbState("idle"), 900);
+    } catch (e) {
+      setOrbState("idle");
+      appendMessage("assistant", "Connection issue, Ruk — check the token or your network and try again.", null, false);
+    } finally {
+      document.getElementById("bb-send").disabled = false;
+    }
+  }
+
+  async function handleSend() {
+    const input = document.getElementById("bb-input");
+    const text = input.value.trim();
+    if (!text) return;
+    if (!ensureToken()) return;
+    input.value = "";
+    appendMessage("user", text, null, false);
+    await sendToSandy(text, false);
+  }
+
+  window.sandyConfirmPending = async function () {
+    if (!pending) return;
+    const msg = pending.message; pending = null;
+    await sendToSandy(msg, true);
+  };
+  window.sandyCancelPending = function () {
+    pending = null;
+    appendMessage("assistant", "Theek hai, cancel kar diya.", null, false);
+  };
+
+  // ---------- Orchestration task graph ----------
+  function renderOrchestrationGraph(graph) {
+    const emptyEl = document.getElementById("cc-graph-empty");
+    const svg = document.getElementById("cc-graph-svg");
+    if (!graph || !graph.nodes || !graph.nodes.length) {
+      emptyEl.style.display = "block";
+      svg.style.display = "none";
+      return;
+    }
+    emptyEl.style.display = "none";
+    svg.style.display = "block";
+
+    // BFS depth from root -- reliable layered layout, no physics needed
+    const byId = {}; graph.nodes.forEach(n => byId[n.id] = n);
+    const children = {}; graph.edges.forEach(([a, b]) => (children[a] = children[a] || []).push(b));
+    const depth = { root: 0 };
+    const queue = ["root"];
+    while (queue.length) {
+      const id = queue.shift();
+      (children[id] || []).forEach(c => { if (!(c in depth)) { depth[c] = depth[id] + 1; queue.push(c); } });
+    }
+    const levels = {};
+    graph.nodes.forEach(n => { const d = depth[n.id] ?? 0; (levels[d] = levels[d] || []).push(n.id); });
+
+    const W = 640, rowH = 90, pad = 60;
+    const maxDepth = Math.max(...Object.keys(levels).map(Number));
+    const H = (maxDepth + 1) * rowH + pad;
+    const pos = {};
+    Object.entries(levels).forEach(([d, ids]) => {
+      const y = Number(d) * rowH + pad / 2;
+      ids.forEach((id, i) => { pos[id] = { x: (W / (ids.length + 1)) * (i + 1), y }; });
+    });
+
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    const edgeLines = graph.edges.map(([a, b]) => {
+      if (!pos[a] || !pos[b]) return "";
+      return `<line class="graph-edge" x1="${pos[a].x}" y1="${pos[a].y}" x2="${pos[b].x}" y2="${pos[b].y}"/>`;
+    }).join("");
+    const nodeEls = graph.nodes.map(n => {
+      const p = pos[n.id]; if (!p) return "";
+      const label = n.label.length > 22 ? n.label.slice(0, 20) + "…" : n.label;
+      return `<g class="graph-node ${n.type}" transform="translate(${p.x},${p.y})">
+        <title>${n.label}</title>
+        <circle r="${n.type === 'task' ? 10 : 7}"/>
+        <text x="0" y="${n.type === 'task' ? 24 : 20}" text-anchor="middle">${label}</text>
+      </g>`;
+    }).join("");
+    svg.innerHTML = edgeLines + nodeEls;
+  }
+
+  document.getElementById("bb-send").addEventListener("click", handleSend);
+  document.getElementById("bb-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); handleSend(); }
+  });
+
+  // ---------- Command Center: click a provider card for real detail ----------
+  const pmBackdrop = document.getElementById("provider-modal-backdrop");
+  function openProviderModal(provider) {
+    if (!lastStatus) return;
+    const meta = window.PROVIDER_META[provider] || {};
+    const cap = (lastStatus.config && lastStatus.config.caps || {})[provider];
+    const used = (lastStatus.usage && lastStatus.usage[provider]) || 0;
+    const model = (lastStatus.models || {})[provider] || "unknown";
+    document.getElementById("pm-title").textContent = provider.charAt(0).toUpperCase() + provider.slice(1);
+    document.getElementById("pm-model").textContent = model;
+    document.getElementById("pm-role").textContent = meta.role || "--";
+    document.getElementById("pm-used").textContent = used;
+    document.getElementById("pm-cap").textContent = cap == null ? "No cap set" : cap;
+    document.getElementById("pm-note").textContent = meta.note || "";
+    if (cap == null) {
+      document.getElementById("pm-big").textContent = `${used} calls today`;
+      document.getElementById("pm-bar").style.width = "0%";
+      document.getElementById("pm-resets").textContent = "No cap -- nothing to reset";
+    } else {
+      const pct = Math.min(100, (used / cap) * 100);
+      document.getElementById("pm-big").textContent = `${Math.round(pct)}% used`;
+      const bar = document.getElementById("pm-bar");
+      bar.style.width = pct + "%";
+      bar.className = "usage-bar-fill" + (pct >= 90 ? " red" : pct >= 70 ? " amber" : "");
+      // Sandy's own tracker resets at server local midnight -- an
+      // estimate of OUR cap, not the provider's actual account limit
+      // (which can hit first, as it did in the log Ruk pasted).
+      const now = new Date();
+      const midnight = new Date(now); midnight.setHours(24, 0, 0, 0);
+      const hrs = Math.floor((midnight - now) / 3600000);
+      const mins = Math.floor(((midnight - now) % 3600000) / 60000);
+      document.getElementById("pm-resets").textContent = `~${hrs}h ${mins}m (Sandy's tracker only)`;
+    }
+    pmBackdrop.classList.add("open");
+  }
+  document.getElementById("pm-close").addEventListener("click", () => pmBackdrop.classList.remove("open"));
+  pmBackdrop.addEventListener("click", (e) => { if (e.target === pmBackdrop) pmBackdrop.classList.remove("open"); });
+  document.getElementById("cc-core-grid").addEventListener("click", (e) => {
+    const card = e.target.closest("[data-provider]");
+    if (card) openProviderModal(card.dataset.provider);
+  });
+
+  // ---------- Collapsible sidebar: hover to expand, collapses the moment
+  // the mouse leaves. Starts collapsed always (icon rail) -- no
+  // click-to-toggle, no persisted state, since "expand while I'm looking
+  // at it" doesn't need to remember anything across reloads.
+  const sidebarEl = document.getElementById("sidebar");
+  sidebarEl.classList.add("collapsed");
+  sidebarEl.addEventListener("mouseenter", () => sidebarEl.classList.remove("collapsed"));
+  sidebarEl.addEventListener("mouseleave", () => sidebarEl.classList.add("collapsed"));
+
+  // ---------- New Chat: summarize since the last reset, clear the ----------
+  // visible pane only. chat_log/Mem0 keep everything -- this is purely a
+  // clean visual start + a recap, not a real separate session.
+  document.getElementById("new-chat-btn").addEventListener("click", async () => {
+    const btn = document.getElementById("new-chat-btn");
+    const original = btn.textContent;
+    btn.textContent = "Summarizing…";
+    try {
+      const res = await fetch("/new_chat", { method: "POST", headers: authHeaders() });
+      const data = await res.json();
+      convLog.innerHTML = `<div class="session-summary-bubble"><div class="label">Last session recap</div>${data.summary}</div>`;
+    } catch (e) {
+      console.warn("new_chat failed", e);
+    } finally {
+      btn.textContent = original;
+    }
+  });
+
+  // ---------- Real status data (caps, memory facts, Hermes jobs) ----------
+  let lastStatus = null;
+
+  async function fetchStatus() {
+    try {
+      const res = await fetch("/status", { headers: authHeaders() });
+      if (!res.ok) return;
+      const data = await res.json();
+      lastStatus = data;
+      renderCaps(data.config, data.usage);
+      renderMemory(data.memory_facts);
+      renderWorkflows(data.jobs);
+      renderCommandCenterJobs(data.jobs);
+      renderAgents(data.jobs);
+      renderOrchestrationGraph(data.orchestration_graph);
+    } catch (e) {
+      console.warn("status fetch failed", e);
+    }
+  }
+
+  function renderCaps(cfg, usage) {
+    if (!cfg) return; // leave the static base cards as-is if config read failed
+    const caps = cfg.caps || {};
+    // scode: this used to match on a card's full textContent (name +
+    // badge text glued together, e.g. "GroqConfigured") against
+    // ["groq","gemini","cerebras"] -- that never once matched, so caps
+    // silently never rendered. data-provider on the card itself is the
+    // direct, unambiguous fix.
+    document.querySelectorAll("#cc-core-grid [data-provider]").forEach((card) => {
+      const provider = card.dataset.provider;
+      const cap = caps[provider];
+      const used = (usage && usage[provider]) || 0;
+      card.querySelector(".card-sub").textContent =
+        cap == null ? "No cap set" : `${used} / ${cap} calls today`;
+      const track = card.querySelector(".usage-bar-track");
+      if (cap == null) { track.style.display = "none"; return; }
+      track.style.display = "block";
+      const pct = Math.min(100, (used / cap) * 100);
+      const fill = track.querySelector(".usage-bar-fill");
+      fill.style.width = pct + "%";
+      fill.className = "usage-bar-fill" + (pct >= 90 ? " red" : pct >= 70 ? " amber" : "");
+    });
+  }
+
+  function renderMemory(facts) {
+    const listEl = document.getElementById("memory-list");
+    const countEl = document.getElementById("memory-count");
+    if (facts === null || facts === undefined) {
+      countEl.textContent = "";
+      listEl.innerHTML = `<div class="placeholder-view"><p>Couldn't load memory right now — check the Space logs.</p></div>`;
+      return;
+    }
+    countEl.textContent = facts.length + " facts";
+    if (facts.length === 0) {
+      listEl.innerHTML = `<div class="placeholder-view"><p>No facts stored yet — Sandy learns automatically as you chat.</p></div>`;
+      return;
+    }
+    listEl.innerHTML = `<div class="grid grid-cols-3">` + facts.map((f) => `
+      <div class="card"><div class="card-sub" style="color:var(--text)">${f}</div></div>
+    `).join("") + `</div>`;
+  }
+
+  function renderWorkflows(jobs) {
+    const listEl = document.getElementById("workflows-list");
+    const countEl = document.getElementById("workflows-count");
+    if (jobs === null || jobs === undefined) {
+      countEl.textContent = "";
+      listEl.innerHTML = `<div class="placeholder-view"><p>Couldn't load workflows right now — check the Space logs.</p></div>`;
+      return;
+    }
+    countEl.textContent = jobs.length + " registered";
+    if (jobs.length === 0) {
+      listEl.innerHTML = `<div class="placeholder-view"><p>No workflows registered yet — try "master &lt;skill&gt; for N days" in Conversations.</p></div>`;
+      return;
+    }
+    listEl.innerHTML = `<div class="grid grid-cols-3">` + jobs.map((j) => {
+      const repeat = j.repeat || {};
+      const progress = repeat.times ? `${repeat.completed || 0}/${repeat.times} sessions` : "";
+      const stateColor = j.state === "scheduled" ? "green" : j.state === "paused" ? "amber" : "red";
+      return `
+      <div class="card">
+        <div class="card-title">${j.name || j.id}<span class="badge badge-${stateColor}">${j.state || "unknown"}</span></div>
+        <div class="card-sub">${j.schedule_display || ""} ${progress ? "· " + progress : ""}</div>
+        ${j.last_error ? `<div class="card-sub" style="color:var(--red)">${j.last_error}</div>` : ""}
+      </div>`;
+    }).join("") + `</div>`;
+  }
+
+  // scode: Command Center's Mastery Jobs card and the Agents tab both read
+  // the SAME real /status jobs field Workflows already uses -- one source
+  // of truth, three places it's surfaced, per Ruk's ask that a job's
+  // existence/status show up in Command Center + Workflows, and what it
+  // actually produced show up in Agents.
+  function renderCommandCenterJobs(jobs) {
+    const el = document.getElementById("cc-jobs-summary");
+    const countEl = document.getElementById("cc-jobs-count");
+    if (!el) return;
+    if (jobs === null || jobs === undefined) {
+      countEl.textContent = "";
+      el.innerHTML = `<div class="card-sub">Couldn't load job status right now.</div>`;
+      return;
+    }
+    const active = jobs.filter((j) => j.state === "scheduled");
+    countEl.textContent = active.length + " active";
+    if (jobs.length === 0) {
+      el.innerHTML = `<div class="card-sub">No mastery job running. Say "master &lt;skill&gt; for N days" in Conversations to start one.</div>`;
+      return;
+    }
+    el.innerHTML = `<div class="grid grid-cols-3">` + jobs.slice(0, 3).map((j) => {
+      const repeat = j.repeat || {};
+      const progress = repeat.times ? `${repeat.completed || 0}/${repeat.times} sessions` : "";
+      return `<div class="card"><div class="card-title">${j.name || j.id}</div><div class="card-sub">${j.state || "unknown"} ${progress ? "· " + progress : ""}</div></div>`;
+    }).join("") + `</div>`;
+  }
+
+  const _agentOutputCache = {};
+  async function renderAgents(jobs) {
+    const el = document.getElementById("agents-list");
+    const countEl = document.getElementById("agents-count");
+    if (!el) return;
+    if (jobs === null || jobs === undefined) {
+      el.innerHTML = `<div class="placeholder-view"><p>Couldn't load agent data right now — check the Space logs.</p></div>`;
+      return;
+    }
+    const ran = jobs.filter((j) => (j.repeat || {}).completed > 0);
+    countEl.textContent = ran.length + " with output";
+    if (ran.length === 0) {
+      el.innerHTML = `<div class="placeholder-view"><p>No mastery job has completed a real session yet -- once one runs, what it actually built shows up here.</p></div>`;
+      return;
+    }
+    el.innerHTML = ran.map((j) => `<div class="card" style="margin-bottom:12px" id="agent-card-${j.id}"><div class="card-title">${j.name || j.id}</div><div class="card-sub">loading real output…</div></div>`).join("");
+    for (const j of ran) {
+      try {
+        const cached = _agentOutputCache[j.id];
+        const outputs = cached || (await (await fetch(`/api/job-output/${j.id}`, { headers: authHeaders() })).json()).outputs;
+        _agentOutputCache[j.id] = outputs;
+        const card = document.getElementById(`agent-card-${j.id}`);
+        if (!card) continue;
+        if (!outputs || outputs.length === 0) {
+          card.querySelector(".card-sub").textContent = "No output file found on disk for this run yet.";
+          continue;
+        }
+        card.innerHTML = `<div class="card-title">${j.name || j.id}</div>` +
+          outputs.map((o) => `<div class="card-sub" style="white-space:pre-wrap;margin-top:6px">[${o.timestamp}]\n${o.content}</div>`).join("<hr>");
+      } catch (e) {
+        console.warn("agent output fetch failed", j.id, e);
+      }
+    }
+  }
+
+  // ---------- Mastery comparison graph (real events only, D3 force layout) ----------
+  const _EVENT_COLORS = {
+    planning: "#7c9cff", worker_call: "#f4d35e", verify: "#5ee6c8",
+    conflict: "#ff5e78", retry_similar: "#ff9e5e", synthesis: "#c88bff",
+    obstacle: "#ff5e78", skill_saved: "#5ee6c8", output: "#ffffff",
+  };
+
+  async function loadRunPicker() {
+    const sel = document.getElementById("graph-run-picker");
+    if (!sel) return;
+    try {
+      const res = await fetch("/api/mastery-runs", { headers: authHeaders() });
+      const data = await res.json();
+      const runs = data.runs || [];
+      if (runs.length === 0) {
+        sel.innerHTML = `<option>No mastery runs yet -- start one in Conversations</option>`;
+        return;
+      }
+      // Real runs, grouped by run_id so picking one loads both agents' graphs for that run
+      const byRun = {};
+      runs.forEach((r) => { (byRun[r.run_id] = byRun[r.run_id] || []).push(r); });
+      sel.innerHTML = Object.entries(byRun).map(([runId, rows]) => {
+        const label = rows.map((r) => `${r.agent}`).join(" + ");
+        return `<option value="${runId}">${runId} (${label}) -- ${rows[0].summary.slice(0, 60)}</option>`;
+      }).join("");
+      sel.onchange = () => loadGraphsForRun(sel.value);
+      if (sel.value) loadGraphsForRun(sel.value);
+    } catch (e) {
+      console.warn("run picker load failed", e);
+    }
+  }
+
+  async function loadGraphsForRun(runId) {
+    try {
+      const res = await fetch(`/api/mastery-graph/${runId}`, { headers: authHeaders() });
+      const data = await res.json();
+      const allEvents = data.events || [];
+      renderForceGraph("graph-svg-sandy", allEvents.filter((e) => e.agent === "sandy"));
+      renderForceGraph("graph-svg-hermes", allEvents.filter((e) => e.agent === "hermes"));
+      const outputEvent = [...allEvents].reverse().find((e) => e.event_type === "output");
+      const outPanel = document.getElementById("graph-output-panel");
+      if (outputEvent) {
+        outPanel.style.display = "block";
+        document.getElementById("graph-output-body").textContent = outputEvent.detail || outputEvent.summary;
+      } else {
+        outPanel.style.display = "none";
+      }
+    } catch (e) {
+      console.warn("graph load failed", e);
+    }
+  }
+
+  function renderForceGraph(svgId, evts) {
+    const svg = d3.select(`#${svgId}`);
+    svg.selectAll("*").remove();
+    if (!evts.length) {
+      svg.append("text").attr("x", 20).attr("y", 30).attr("fill", "#666").text("No events yet -- nothing has run.");
+      return;
+    }
+    const width = svg.node().clientWidth || 400, height = 300;
+    const nodes = evts.map((e) => ({ id: e.id, event: e }));
+    const links = [];
+    evts.forEach((e) => {
+      if (e.parent_event_id) links.push({ source: e.parent_event_id, target: e.id, kind: "parent" });
+      (e.related_event_ids || []).forEach((rid) => links.push({ source: e.id, target: rid, kind: "similar" }));
+    });
+    // real edge fallback: chain consecutive events in the same round when no explicit parent exists,
+    // so the graph reads as a real timeline even before every event carries parent_event_id
+    for (let i = 1; i < nodes.length; i++) {
+      if (!evts[i].parent_event_id) links.push({ source: nodes[i - 1].id, target: nodes[i].id, kind: "sequence" });
+    }
+    const sim = d3.forceSimulation(nodes)
+      .force("link", d3.forceLink(links).id((d) => d.id).distance(45).strength(0.4))
+      .force("charge", d3.forceManyBody().strength(-90))
+      .force("center", d3.forceCenter(width / 2, height / 2))
+      .force("collide", d3.forceCollide(14));
+    const link = svg.append("g").selectAll("line").data(links).join("line")
+      .attr("stroke", (d) => d.kind === "similar" ? "#ff9e5e" : "#333")
+      .attr("stroke-dasharray", (d) => d.kind === "similar" ? "3,3" : null)
+      .attr("stroke-width", 1);
+    const node = svg.append("g").selectAll("circle").data(nodes).join("circle")
+      .attr("r", (d) => d.event.event_type === "output" ? 10 : 7)
+      .attr("fill", (d) => _EVENT_COLORS[d.event.event_type] || "#999")
+      .attr("opacity", 0.9)
+      .style("cursor", "pointer")
+      .on("click", (_, d) => showNodeDetail(d.event))
+      .call(d3.drag()
+        .on("start", (ev, d) => { if (!ev.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+        .on("drag", (ev, d) => { d.fx = ev.x; d.fy = ev.y; })
+        .on("end", (ev, d) => { if (!ev.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
+    node.append("title").text((d) => d.event.summary);
+    sim.on("tick", () => {
+      link.attr("x1", (d) => d.source.x).attr("y1", (d) => d.source.y)
+          .attr("x2", (d) => d.target.x).attr("y2", (d) => d.target.y);
+      node.attr("cx", (d) => d.x).attr("cy", (d) => d.y);
+    });
+  }
+
+  function showNodeDetail(event) {
+    const panel = document.getElementById("graph-node-detail");
+    panel.style.display = "block";
+    document.getElementById("graph-node-detail-body").textContent =
+      `[${event.agent} · round ${event.round} · ${event.event_type}${event.provider ? " · " + event.provider : ""}]\n\n${event.summary}` +
+      (event.detail ? `\n\n${event.detail}` : "");
+  }
+
+  async function askAboutGraph(runId) {
+    const input = document.getElementById("graph-chat-input");
+    const q = input.value.trim();
+    if (!q) return;
+    const ansEl = document.getElementById("graph-chat-answer");
+    ansEl.textContent = "...";
+    try {
+      const res = await fetch(`/api/mastery-graph/${runId}/explain`, {
+        method: "POST", headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ question: q }),
+      });
+      const data = await res.json();
+      ansEl.textContent = data.answer || "(no answer)";
+    } catch (e) {
+      ansEl.textContent = "Error asking about the graph: " + e;
+    }
+    input.value = "";
+  }
+
+  // scode: real bug found live -- this handler used to only get wired
+  // INSIDE loadGraphsForRun(), so with zero real runs yet (nothing had
+  // successfully completed), the picker never called it and the Ask
+  // button had NO handler at all -- clicking it silently did nothing,
+  // which read as "the graph bot is not working". Wired once here,
+  // unconditionally, reading the picker's live value at click-time.
+  document.getElementById("graph-chat-send").addEventListener("click", () => {
+    const sel = document.getElementById("graph-run-picker");
+    const runId = sel && sel.value;
+    const ansEl = document.getElementById("graph-chat-answer");
+    if (!runId || runId.startsWith("No mastery runs")) {
+      ansEl.textContent = "Ruk, abhi koi real mastery run hi nahi hai is dropdown me -- pehle ek confirm karo, phir yahan pooch sakta hai.";
+      return;
+    }
+    askAboutGraph(runId);
+  });
+
+  // ---------- Boot ----------
+  // ---------- Model choice persistence (survives refresh) ----------
+  const MODEL_KEY = "sandy_model_choice";
+  const modelSelect = document.getElementById("model-select");
+  const savedModel = localStorage.getItem(MODEL_KEY);
+  if (savedModel !== null) modelSelect.value = savedModel;
+  modelSelect.addEventListener("change", () => localStorage.setItem(MODEL_KEY, modelSelect.value));
+
+  if (ensureToken()) { loadHistory(); fetchStatus(); }
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("/service-worker.js").catch(() => {});
+})();
+</script>
+</body>
+</html>
