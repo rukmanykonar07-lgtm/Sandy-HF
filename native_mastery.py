@@ -34,6 +34,7 @@ import re
 import brain
 import config
 import events
+import healing
 from identity import SANDY_SYSTEM_PROMPT
 from llm import call_llm_with_fallback, log, MODELS
 
@@ -469,6 +470,16 @@ def _run(job_id: str) -> str:
             job["state"] = "failed"
             _save_job(job)
         result = f"Run failed: {e}"
+        # Real, live in-process failure -- unlike a Hermes job, we know about
+        # this the INSTANT it happens, not on the next poll cycle. No auto-fix
+        # exists for a native run (no provider/model to re-pin the way a
+        # Hermes job has), so this just gets the real diagnosis to Ruk fast
+        # instead of making him wait or ask.
+        try:
+            diag = healing.classify_error(str(e), entity=job["skill"] if job else job_id)
+            healing.alert_and_store([{"job": {"id": job_id, "name": f"native: {job['skill'] if job else job_id}", "engine": "native"}, "diag": diag, "fix": None}])
+        except Exception as alert_err:
+            log(f"[native_mastery._run] failure-alert itself failed, non-fatal: {alert_err!r}")
     try:
         events.link_similar_events(events.get_events(job_id))
     except Exception as e:

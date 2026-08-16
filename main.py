@@ -10,6 +10,7 @@ Flow per message:
 import json
 import os
 import re
+import asyncio
 
 from fastapi import FastAPI, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +21,7 @@ from pydantic import BaseModel
 import chatlog
 import codebase
 import config
+import healing
 import search
 from identity import SANDY_SYSTEM_PROMPT, CAPABILITIES
 import memory
@@ -32,6 +34,26 @@ import youtube
 from llm import call_llm, call_llm_with_fallback, CapExceeded, MODELS, strip_json_fence, log
 
 app = FastAPI()
+
+
+@app.on_event("startup")
+async def _start_healing_loop():
+    """Real periodic failure check -- every 5 min while the container is
+    awake. Honest limitation: HF Spaces free tier sleeps on idle, so this
+    loop sleeps with it -- it's not a substitute for the opportunistic
+    check in _handle_chat (which fires on every real message, the more
+    reliable of the two), just an addition for whenever the container
+    happens to be up with nobody actively chatting."""
+    async def _loop():
+        while True:
+            try:
+                alerts = await asyncio.to_thread(healing.run_check_and_alert)
+                if alerts:
+                    log(f"[healing] periodic loop: {len(alerts)} new failure(s) detected and alerted")
+            except Exception as e:
+                log(f"[healing] periodic loop error, continuing: {e!r}")
+            await asyncio.sleep(300)
+    asyncio.create_task(_loop())
 
 
 _TRIVIAL_WORDS = {
@@ -385,6 +407,44 @@ def chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatResponse:
 
 
 def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatResponse:
+    # Opportunistic failure check -- runs on every real message, not just
+    # a fixed timer. Given HF Spaces sleeps the container when idle, a
+    # periodic-only check could sleep through a failure for hours; a real
+    # incoming message means the container is awake RIGHT NOW, which is
+    # the most reliable moment to actually check. Best-effort -- must
+    # never block or break a normal chat turn.
+    try:
+        new_alerts = healing.run_check_and_alert()
+        if new_alerts:
+            log(f"[healing] {len(new_alerts)} new failure(s) detected and alerted")
+    except Exception as e:
+        log(f"[healing] opportunistic check failed, continuing chat normally: {e!r}")
+
+    # A short plain affirmative ("haan"/"fix it"/"kar do") with a real
+    # pending fix waiting resolves it directly -- Ruk shouldn't have to
+    # retype the exact pin command after Sandy already told him what she
+    # wants to do. Tight regex on purpose -- must NOT fire on an
+    # unrelated longer message that happens to contain "yes" somewhere.
+    if re.fullmatch(r"\s*(yes|haan|ha|hn|fix it|kar do|solve it|theek hai|go ahead|apply|apply kar do)\s*[.!]?\s*", req.message, re.I):
+        pending = healing.list_pending_fixes()
+        if len(pending) == 1:
+            fix = pending[0]
+            _remember(background_tasks, req.message, role="user")
+            try:
+                reply = mastery.edit_mastery_job(fix["job_ref"], fix["updates"])
+                healing.pop_pending_fix(fix["job_ref"])
+            except Exception as e:
+                log(f"[healing] pending-fix apply failed: {e!r}")
+                reply = f"Ruk, fix apply karte waqt real error aa gaya: {e}"
+            _remember(background_tasks, reply, role="assistant")
+            return ChatResponse(reply=reply)
+        elif len(pending) > 1:
+            _remember(background_tasks, req.message, role="user")
+            reply = "Ruk, ek se zyada pending fixes hain -- exact job bata kaunsa apply karna hai: " + ", ".join(f"{f['job_ref']} ({f['updates']})" for f in pending)
+            _remember(background_tasks, reply, role="assistant")
+            return ChatResponse(reply=reply)
+        # else: no pending fix -- fall through, this is just an ordinary "yes"/chat message
+
     # /masterystart is a shorthand trigger, NOT a bypass -- strip the
     # prefix and let the rest flow through the exact same classification
     # + explain-first pipeline as typing it in plain English. This
