@@ -81,6 +81,30 @@ def _is_trivial(text: str) -> bool:
     return all(w in _TRIVIAL_WORDS for w in words)
 
 
+_AFFIRMATIVE_TOKENS = {
+    "yes", "ya", "yeah", "yep", "sure", "ok", "okay",
+    "haan", "han", "ha", "hn", "haanji",
+    "fix", "it", "kar", "do", "karo", "kardo",
+    "solve", "confirm", "apply",
+    "theek", "thik", "hai", "sahi",
+    "go", "ahead",
+}
+
+
+def _is_short_affirmative(text: str) -> bool:
+    """Every real word in the message is in a small affirmative
+    whitelist, and there aren't many of them. Token-based on purpose --
+    scode: real bug found live -- a rigid phrase-enumeration regex
+    required an exact match against one whole alternative, so "haan, fix
+    it" (comma-joined) matched none of them and fell through to the
+    classifier. Checking word-by-word instead of phrase-by-phrase closes
+    the whole class of near-miss, not just that one exact wording."""
+    words = re.findall(r"[a-zA-Z']+", text.lower())
+    if not words or len(words) > 5:
+        return False
+    return all(w in _AFFIRMATIVE_TOKENS for w in words)
+
+
 def _remember(background_tasks: BackgroundTasks, text: str, role: str) -> None:
     """chat_log gets written SYNCHRONOUSLY, before the response returns --
     it's a fast, cheap DB insert, and Ruk closing the tab right after
@@ -389,11 +413,11 @@ def classify_message(message: str, pending_skill: str | None = None) -> dict:
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatResponse:
     try:
-        return _handle_chat(req, background_tasks)
+        resp = _handle_chat(req, background_tasks)
     except CapExceeded as e:
         # ponytail: one guard around the whole flow, not one per LLM call-site —
         # every path through this function calls an LLM somewhere.
-        return ChatResponse(
+        resp = ChatResponse(
             reply=f"Can't do that right now — {e}. Tell me to raise the cap or try again later."
         )
     except Exception as e:
@@ -401,9 +425,32 @@ def chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatResponse:
         # flow (broken provider config, etc) should never surface as a raw
         # 500 to Ruk. Logged here so it's still visible in the Space logs.
         log(f"[/chat] unhandled error: {e!r}")
-        return ChatResponse(
+        resp = ChatResponse(
             reply="Kuch gadbad ho gayi mere end pe, Ruk — Space logs check kar, koi provider/config galat lag raha hai."
         )
+
+    # Step 2 -- Proactive Reporting. One single choke point (not wrapped
+    # around every one of _handle_chat's many internal return points) --
+    # any real failure Sandy hasn't SHOWN Ruk in chat yet gets prepended
+    # here, regardless of what he actually asked this turn. This is the
+    # channel that can never silently fail to reach him the way an
+    # unconfigured WhatsApp secret can (confirmed from his own logs it
+    # currently does) -- chat is guaranteed, WhatsApp is best-effort on
+    # top of it, not instead of it.
+    try:
+        unannounced = healing.list_unannounced_fixes()
+        if unannounced:
+            blocks = []
+            for f in unannounced:
+                block = f"⚠️ Ruk, ek real problem hai -- '{f['job_name']}' ({f['job_ref']}): {f['root_cause']}."
+                block += f" PROPOSED FIX: {f['updates']} -- 'haan'/'fix it' bolo." if f["updates"] else " Iska koi safe auto-fix nahi hai -- khud dekhna padega."
+                blocks.append(block)
+                healing.mark_announced(f["job_ref"])
+            resp.reply = "\n\n".join(blocks) + "\n\n---\n\n" + resp.reply
+    except Exception as e:
+        log(f"[healing] chat-alert prepend failed, continuing: {e!r}")
+
+    return resp
 
 
 def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatResponse:
@@ -420,30 +467,46 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
     except Exception as e:
         log(f"[healing] opportunistic check failed, continuing chat normally: {e!r}")
 
-    # A short plain affirmative ("haan"/"fix it"/"kar do") with a real
-    # pending fix waiting resolves it directly -- Ruk shouldn't have to
-    # retype the exact pin command after Sandy already told him what she
-    # wants to do. Tight regex on purpose -- must NOT fire on an
-    # unrelated longer message that happens to contain "yes" somewhere.
-    if re.fullmatch(r"\s*(yes|haan|ha|hn|fix it|kar do|solve it|theek hai|go ahead|apply|apply kar do)\s*[.!]?\s*", req.message, re.I):
-        pending = healing.list_pending_fixes()
+    # Step 1 -- Self-Heal Intercept. A short affirmative ("haan, fix it" /
+    # "yes" / "kar do") with a real pending fix waiting resolves it
+    # directly -- bypasses classify_message and the LLM chat pipeline
+    # entirely, so there is no window for a hallucinated "done" reply.
+    # scode: real bug found live from Ruk's own log -- the old version
+    # used a rigid phrase-enumeration regex that required an EXACT match
+    # against one whole alternative, so "haan, fix it" (comma-joined)
+    # matched NONE of them and fell through to the classifier, which is
+    # exactly the failure this feature exists to prevent. Token-based
+    # matching (every word individually in a small whitelist) closes
+    # this whole class of near-miss instead of patching one phrase.
+    if _is_short_affirmative(req.message):
+        pending = healing.list_announced_pending_fixes()
         if len(pending) == 1:
             fix = pending[0]
             _remember(background_tasks, req.message, role="user")
-            try:
-                reply = mastery.edit_mastery_job(fix["job_ref"], fix["updates"])
-                healing.pop_pending_fix(fix["job_ref"])
-            except Exception as e:
-                log(f"[healing] pending-fix apply failed: {e!r}")
-                reply = f"Ruk, fix apply karte waqt real error aa gaya: {e}"
+            if not fix["updates"]:
+                # Honest path -- some failures (skill_missing/rate_limit/auth/
+                # timeout/native/hermes-internal-bug) have no safe auto-fix.
+                # Saying "haan" to one of these must NOT pretend to apply
+                # something that doesn't exist -- that's the exact
+                # hallucination this whole feature is meant to prevent.
+                reply = f"Ruk, '{fix['job_name']}' ({fix['job_ref']}) ka koi safe auto-fix nahi hai ({fix['root_cause']}) -- khud dekhna padega, ya bata kya karna hai."
+            else:
+                try:
+                    reply = mastery.edit_mastery_job(fix["job_ref"], fix["updates"])
+                    trigger_reply = mastery.trigger_mastery_job_now(fix["job_ref"])
+                    reply += f"\n\n{trigger_reply}"
+                    healing.pop_pending_fix(fix["job_ref"])
+                except Exception as e:
+                    log(f"[healing] pending-fix apply failed: {e!r}")
+                    reply = f"Ruk, fix apply karte waqt real error aa gaya: {e}"
             _remember(background_tasks, reply, role="assistant")
             return ChatResponse(reply=reply)
         elif len(pending) > 1:
             _remember(background_tasks, req.message, role="user")
-            reply = "Ruk, ek se zyada pending fixes hain -- exact job bata kaunsa apply karna hai: " + ", ".join(f"{f['job_ref']} ({f['updates']})" for f in pending)
+            reply = "Ruk, ek se zyada pending fixes hain -- exact job bata kaunsa apply karna hai: " + ", ".join(f"{f['job_ref']} ({f['updates'] or 'no auto-fix'})" for f in pending)
             _remember(background_tasks, reply, role="assistant")
             return ChatResponse(reply=reply)
-        # else: no pending fix -- fall through, this is just an ordinary "yes"/chat message
+        # else: no pending fix at all -- fall through, this is just an ordinary "yes"/chat message
 
     # /masterystart is a shorthand trigger, NOT a bypass -- strip the
     # prefix and let the rest flow through the exact same classification
