@@ -491,14 +491,26 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
                 # hallucination this whole feature is meant to prevent.
                 reply = f"Ruk, '{fix['job_name']}' ({fix['job_ref']}) ka koi safe auto-fix nahi hai ({fix['root_cause']}) -- khud dekhna padega, ya bata kya karna hai."
             else:
+                # Real fix and its cleanup bookkeeping are deliberately
+                # separated -- a real bug found live: pop_pending_fix's
+                # own crash (Postgres NOT NULL violation, now fixed
+                # separately) got caught by a shared except block and
+                # reported to Ruk as "the fix failed", when the actual
+                # edit_mastery_job() call had already succeeded. Sandy
+                # must never report a real success as a failure just
+                # because unrelated bookkeeping afterward had a problem.
                 try:
                     reply = mastery.edit_mastery_job(fix["job_ref"], fix["updates"])
                     trigger_reply = mastery.trigger_mastery_job_now(fix["job_ref"])
                     reply += f"\n\n{trigger_reply}"
-                    healing.pop_pending_fix(fix["job_ref"])
                 except Exception as e:
-                    log(f"[healing] pending-fix apply failed: {e!r}")
+                    log(f"[healing] real fix apply failed: {e!r}")
                     reply = f"Ruk, fix apply karte waqt real error aa gaya: {e}"
+                else:
+                    try:
+                        healing.pop_pending_fix(fix["job_ref"])
+                    except Exception as e:
+                        log(f"[healing] fix succeeded but cleanup bookkeeping failed (non-fatal, cosmetic only): {e!r}")
             _remember(background_tasks, reply, role="assistant")
             return ChatResponse(reply=reply)
         elif len(pending) > 1:

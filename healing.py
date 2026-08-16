@@ -215,7 +215,11 @@ def pop_pending_fix(job_id: str) -> dict | None:
     import config
     record = config.get_config(f"pending_fix:{job_id}")
     if record:
-        config.set_config(f"pending_fix:{job_id}", None)
+        # scode: real bug found live -- set_config(key, None) crashes
+        # (Postgres 23502) because sandy_config.value is NOT NULL.
+        # delete_config actually removes the row instead of trying to
+        # write a null into a column that can't hold one.
+        config.delete_config(f"pending_fix:{job_id}")
         ids = set(config.get_config(_pending_index_key()) or [])
         ids.discard(job_id)
         config.set_config(_pending_index_key(), list(ids))

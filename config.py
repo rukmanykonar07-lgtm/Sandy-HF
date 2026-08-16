@@ -51,8 +51,23 @@ def get_config(key: str):
 
 def set_config(key: str, value) -> None:
     """Write/overwrite one config key. This is what Sandy calls when
-    Ruk says 'change the Gemini cap to 100' etc."""
+    Ruk says 'change the Gemini cap to 100' etc.
+
+    NEVER call this with value=None to "clear" a key -- sandy_config's
+    real schema has `value jsonb NOT NULL` (see the table definition
+    above); this confirmed crashes live with Postgres error 23502 (null
+    value in column "value" violates not-null constraint). Use
+    delete_config() below to actually remove a key."""
+    if value is None:
+        raise ValueError("set_config(key, None) is not allowed -- sandy_config.value is NOT NULL. Use delete_config(key) to clear a key.")
     _db().table("sandy_config").upsert({"key": key, "value": value}).execute()
+
+
+def delete_config(key: str) -> None:
+    """Actually removes the row -- the correct way to clear a key.
+    set_config(key, None) looks like it should mean the same thing but
+    silently violates the real NOT NULL constraint on `value` instead."""
+    _db().table("sandy_config").delete().eq("key", key).execute()
 
 
 def get_all_config() -> dict:

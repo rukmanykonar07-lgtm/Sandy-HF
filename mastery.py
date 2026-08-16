@@ -90,7 +90,7 @@ def pop_pending_explore(session_id: str) -> str | None:
     import config
     skill = config.get_config(_explore_key(session_id))
     if skill:
-        config.set_config(_explore_key(session_id), None)
+        config.delete_config(_explore_key(session_id))
     return skill
 
 
@@ -246,7 +246,7 @@ def confirm_plan(session_id: str) -> str:
     pending = config.get_config(_pending_key(session_id))
     if not pending:
         return "Ruk, koi pending plan nahi mila is session ke liye -- pehle naya mastery request bhejo."
-    config.set_config(_pending_key(session_id), None)
+    config.delete_config(_pending_key(session_id))
     return start_mastery(pending["skill"], pending["days"], pending["hours_per_day"], approach=pending.get("plan"))
 
 
