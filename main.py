@@ -171,6 +171,7 @@ def classify_message(message: str, pending_skill: str | None = None) -> dict:
         '  "mastery": {"skill": "...", "days": 3, "hours_per_day": 4, "engine": "hermes"} or null,\n'
         '  "mastery_explore": {"skill": "...", "engine": "hermes"} or null,\n'
         '  "mastery_control": {"action": "pause", "engine": "native", "job_ref": null} or null,\n'
+        '  "hermes_job_edit": {"job_ref": "...", "updates": {"provider": "gemini"}} or null,\n'
         '  "codebase_analysis": false,\n'
         '  "logs_request": false,\n'
         '  "search_needed": false,\n'
@@ -210,6 +211,15 @@ def classify_message(message: str, pending_skill: str | None = None) -> dict:
         "job_status_request). engine: 'native' for his own orchestration jobs, 'hermes' for "
         "cron jobs -- guess from context if not explicit. job_ref: the specific job id or "
         "name if he names/quotes one, else null.\n"
+        "- hermes_job_edit: set when Ruk wants to PIN, UPDATE, or CHANGE a real PARAMETER "
+        "(provider, model, schedule, skills, prompt) on an EXISTING Hermes cron job -- 'pin "
+        "job X to gemini', 'update job Y's schedule', 'change the model on Z'. NOT proposing a "
+        "new job (mastery/mastery_explore), NOT pause/resume/continue/remove (mastery_control). "
+        "job_ref: the job id or name Ruk gave. updates: ONLY the exact key(s)/value(s) Ruk "
+        "actually said -- e.g. he says 'pin to gemini' -> {\"provider\": \"gemini\"} only. "
+        "NEVER add a key he didn't mention (no inventing a 'skills' or 'model' value he never "
+        "gave you, even if it seems like it would help) -- an edit with a value Ruk didn't "
+        "actually ask for is not a real edit, it's a fabrication with real side effects.\n"
         "- codebase_analysis: true for READ-ONLY review/scan/analyze of Sandy's own "
         "source code -- not asking to change/fix/edit anything (that's selfmod's job). This "
         "INCLUDES questions about a specific feature's code/files -- 'what's new in the "
@@ -330,12 +340,19 @@ def classify_message(message: str, pending_skill: str | None = None) -> dict:
     else:
         mastery_control = None
 
+    hermes_job_edit = data.get("hermes_job_edit")
+    if isinstance(hermes_job_edit, dict) and hermes_job_edit.get("job_ref") and isinstance(hermes_job_edit.get("updates"), dict) and hermes_job_edit["updates"]:
+        hermes_job_edit = {"job_ref": hermes_job_edit["job_ref"], "updates": hermes_job_edit["updates"]}
+    else:
+        hermes_job_edit = None
+
     return {
         "config_change": cfg,
         "selfmod": selfmod_req,
         "mastery": mastery_req,
         "mastery_explore": mastery_explore,
         "mastery_control": mastery_control,
+        "hermes_job_edit": hermes_job_edit,
         "codebase_analysis": bool(data.get("codebase_analysis")),
         "logs_request": bool(data.get("logs_request")),
         "search_needed": bool(data.get("search_needed")),
@@ -582,6 +599,28 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
         except Exception as e:
             log(f"[mastery_control] real failure: {e!r}")
             reply = f"Ruk, {action} karte waqt real error aa gaya: {e}"
+        _remember(background_tasks, reply, role="assistant")
+        return ChatResponse(reply=reply)
+
+    hje = cls["hermes_job_edit"]
+    if hje:
+        # Real spend-adjacent change (provider/model pin) -- confirm first,
+        # same pattern as selfmod/mastery proposals, not applied silently
+        # like a cap-number tweak. This whole branch exists because this
+        # exact request used to hit NO handler at all (mastery_req=None,
+        # mastery_explore=None -- confirmed from Ruk's own log) and fell
+        # into generic chat, which then narrated a fake CLI command and a
+        # fake "done" instead of touching anything real.
+        if not req.approved:
+            _remember(background_tasks, req.message, role="user")
+            reply = f"Ruk, confirm karo -- job '{hje['job_ref']}' ko {hje['updates']} se update kar du?"
+            return ChatResponse(reply=reply, needs_approval=True)
+        _remember(background_tasks, req.message, role="user")
+        try:
+            reply = mastery.edit_mastery_job(hje["job_ref"], hje["updates"])
+        except Exception as e:
+            log(f"[hermes_job_edit] real failure: {e!r}")
+            reply = f"Ruk, update karte waqt real error aa gaya: {e}"
         _remember(background_tasks, reply, role="assistant")
         return ChatResponse(reply=reply)
 
