@@ -15,6 +15,7 @@ from pathlib import Path
 from cron.jobs import (
     create_job, list_jobs, pause_job, resume_job, trigger_job, remove_job,
     update_job, resolve_job_ref, AmbiguousJobReference,
+    get_ticker_heartbeat_age, get_ticker_success_age,
 )
 from identity import SANDY_SYSTEM_PROMPT
 from llm import call_llm_with_fallback, log
@@ -358,6 +359,60 @@ def backfill_events_from_output(job_id: str) -> int:
         if added:
             events.log_event(run_id, "hermes", "output", f"Session output ({out['timestamp']})", detail=out["content"])
     return added
+
+
+def scheduler_health() -> str:
+    """Is Hermes's own background ticker actually alive -- separate from
+    any single job's state. A dead/stuck ticker explains 'next run
+    Unknown'/'nothing ever fires' for EVERY job at once, and used to be
+    completely invisible -- Ruk could only ever see per-job fields, never
+    whether the scheduler loop itself was running."""
+    hb_age = get_ticker_heartbeat_age()
+    ok_age = get_ticker_success_age()
+    if hb_age is None:
+        return "⚠️ SCHEDULER: heartbeat file hi nahi mila -- ya to ticker kabhi chala hi nahi is container pe, ya fresh container hai. Isi wajah se next-run times 'unknown' dikh sakte hain, kisi individual job ka fault nahi."
+    if hb_age > 180:
+        return f"⚠️ SCHEDULER: ticker heartbeat {int(hb_age)}s purana hai (har ~60s update hona chahiye) -- ticker DEAD lagta hai. Yehi wajah hai agar koi job fire nahi ho raha -- individual job ka fault nahi hai."
+    if ok_age is None or ok_age > 180:
+        return f"⚠️ SCHEDULER: ticker zinda hai (heartbeat {int(hb_age)}s purana) lekin {'kabhi' if ok_age is None else f'{int(ok_age)}s se'} ek bhi tick error ke bina complete nahi hua -- loop chal raha hai par har baar fail ho raha hai."
+    return f"scheduler theek hai -- last successful tick {int(ok_age)}s pehle."
+
+
+def job_diagnostics(job_ref: str) -> str:
+    """Everything real about ONE Hermes job -- state, real schedule,
+    next/last run, any real error, AND what's actually sitting in its
+    output directory. Built because 'is the job running' and 'is there
+    a fault' used to get the exact same generic one-line summary --
+    this is the real, complete picture instead."""
+    try:
+        job = resolve_job_ref(job_ref)
+    except AmbiguousJobReference as e:
+        return f"Ruk, '{job_ref}' se multiple jobs match ho rahe hain -- exact job ID do: {e}"
+    if not job:
+        return f"Ruk, '{job_ref}' naam/id ka Hermes job nahi mila."
+
+    lines = [f"**{job['name']}** ({job['id']})"]
+    state_line = f"- state: {job['state']}"
+    if job["state"] == "paused":
+        state_line += f" (reason: {job.get('paused_reason') or 'no reason given'})"
+    lines.append(state_line)
+    lines.append(f"- schedule: {job.get('schedule_display', 'unknown')}")
+    lines.append(f"- next run: {job.get('next_run_at') or 'not set'}")
+    lines.append(f"- last run: {job.get('last_run_at') or 'never run yet'} (status: {job.get('last_status') or 'n/a'})")
+    if job.get("last_error"):
+        lines.append(f"- ⚠️ LAST ERROR: {job['last_error']}")
+    if job.get("last_delivery_error"):
+        lines.append(f"- ⚠️ DELIVERY ERROR: {job['last_delivery_error']}")
+    repeat = job.get("repeat") or {}
+    if repeat.get("times"):
+        lines.append(f"- sessions: {repeat.get('completed', 0)}/{repeat['times']}")
+    outputs = job_output(job["id"], limit=3)
+    d = f"~/.hermes/cron/output/{job['id']}/"
+    if not outputs:
+        lines.append(f"- directory ({d}): EMPTY -- koi session ne abhi tak kuch likha nahi.")
+    else:
+        lines.append(f"- directory ({d}): {len(outputs)} recent file(s), sabse naya: {outputs[0]['timestamp']}")
+    return "\n".join(lines)
 
 
 def list_mastery_jobs() -> list[dict]:

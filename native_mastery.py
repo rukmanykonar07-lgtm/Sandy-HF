@@ -92,6 +92,34 @@ def latest_job_for_session(session_id: str, state: str | None = None) -> dict | 
     return None
 
 
+def job_diagnostics(job_id: str) -> str:
+    """Everything real about ONE native job -- state, weights/caps/usage,
+    round count, AND the real recent event trail (not a narrated
+    summary) so a genuine issue -- a worker failing, a cap being hit, a
+    replan -- is visible instead of just 'running' or 'done'."""
+    job = get_job(job_id)
+    if not job:
+        return f"Ruk, native job {job_id} nahi mila."
+    lines = [f"**native: {job['skill']}** ({job['id']})"]
+    lines.append(f"- state: {job['state']}")
+    lines.append(f"- mode: {job['mode']}")
+    lines.append(f"- weights: {job['weights'] or 'default split (groq/cerebras)'}")
+    lines.append(f"- per-job caps: {job['caps'] or 'none set -- only the global daily cap applies'}")
+    lines.append(f"- usage this job: {job.get('usage') or 'kuch use nahi hua abhi'}")
+    lines.append(f"- rounds completed: {job.get('round', 0)}")
+    if job["state"] == "failed":
+        lines.append(f"- ⚠️ LAST ERROR: {job.get('result')}")
+    ev = events.get_events(job_id)
+    if not ev:
+        lines.append("- events: koi bhi nahi -- abhi tak real kaam start hi nahi hua.")
+    else:
+        lines.append(f"- last {min(5, len(ev))} real events:")
+        for e in ev[-5:]:
+            marker = "⚠️ " if e.get("event_type") == "obstacle" else ""
+            lines.append(f"  - round {e.get('round')}: {marker}[{e.get('event_type')}] {e.get('summary')}")
+    return "\n".join(lines)
+
+
 def status_shape() -> list[dict]:
     """Native jobs normalized into the same shape Hermes jobs already
     use for Ruk's Home's Workflows/Agents tabs (id/name/state/next_run_at/
