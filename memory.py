@@ -25,7 +25,26 @@ RUK = "ruk"  # single user for now — multi-user is a config value away, not a 
 # (_check_and_bump_cap) so it now actually respects caps set via chat --
 # "set gemini cap to X" now genuinely limits this call too, not just the
 # visible chat replies.
+#
+# Then live logs (17 Aug 2026) showed a DIFFERENT real problem: Gemini's
+# free tier caps generate_content_free_tier_requests at 20/DAY total for
+# gemini-3.5-flash -- with remember() firing on every single message,
+# that's exhausted almost immediately, and every extraction after that
+# silently fails (message still lands in chat_log, but nothing gets
+# permanently learned via Mem0 -- a real, meaningful degradation of "Sandy
+# remembers everything," not cosmetic).
+#
+# Switching straight back to Groq would UN-fix the original bug (same
+# shared 100k/day account cap chat already leans on hard). Real fix: a
+# genuine fallback, not a single point of failure -- gemini primary (still
+# useful for the first ~20 msgs/day), Cerebras as fallback via Mem0's
+# "litellm" passthrough provider. Cerebras isn't in Mem0's own native
+# provider list, but litellm already knows it (same MODELS["cerebras"]
+# string used everywhere else in this codebase) -- and it's not already
+# under heavy contention the way Groq (chat) or Gemini (its own tiny cap)
+# both are.
 _MEM_PROVIDER = "gemini"
+_MEM_FALLBACK_PROVIDER = "cerebras"
 _config = {
     "vector_store": {
         "provider": "supabase",
@@ -54,7 +73,20 @@ _config = {
     },
 }
 
+# Same vector_store/embedder (embeddings weren't the thing hitting quota --
+# only gemini's LLM extraction call was) -- only the LLM leg changes,
+# routed through litellm so it can use the exact same MODELS["cerebras"]
+# model string call_llm_with_fallback already relies on elsewhere.
+_fallback_config = {
+    **_config,
+    "llm": {
+        "provider": "litellm",
+        "config": {"model": "cerebras/gpt-oss-120b"},
+    },
+}
+
 _memory: Memory | None = None
+_memory_fallback: Memory | None = None
 
 
 def _m() -> Memory:
@@ -64,23 +96,41 @@ def _m() -> Memory:
     return _memory
 
 
+def _m_fallback() -> Memory:
+    global _memory_fallback
+    if _memory_fallback is None:
+        _memory_fallback = Memory.from_config(_fallback_config)
+    return _memory_fallback
+
+
 def remember(message: str, role: str = "user") -> None:
     """Store a message so Sandy can recall it later. Mem0 auto-extracts
     the actual facts worth keeping -- we don't decide what's important.
-    Best-effort: if this fails (e.g. Groq's TPD cap, which Mem0's own
-    internal LLM call doesn't respect Sandy's cap system for), the raw
-    message is still safe in chat_log -- losing one fact extraction is
-    not worth crashing the background task over, which is exactly what
-    was happening before this try/except existed."""
+
+    Real 2-tier fallback, not a single point of failure: gemini first
+    (cap-checked for real), and ONLY on gemini actually failing (its tiny
+    20/day free-tier cap, or any other real error) does this fall back to
+    Cerebras (also cap-checked, separately, for real) -- not Groq, which
+    would silently reintroduce the exact contention bug that got Mem0
+    moved off Groq in the first place. If BOTH fail, the raw message is
+    still safe in chat_log -- losing one fact extraction is not worth
+    crashing the background task over."""
     try:
-        _check_and_bump_cap(_MEM_PROVIDER)  # counts as one call against the same cap Ruk sets via chat
-    except CapExceeded as e:
-        log(f"[memory.remember] {_MEM_PROVIDER} capped, skipping extraction this message: {e}")
-        return
-    try:
+        _check_and_bump_cap(_MEM_PROVIDER)
         _m().add(message, user_id=RUK, metadata={"role": role})
+        return
+    except CapExceeded as e:
+        log(f"[memory.remember] {_MEM_PROVIDER} capped, trying fallback: {e}")
     except Exception as e:
-        log(f"[memory.remember] Mem0 extraction failed, message stays in chat_log only: {e!r}")
+        log(f"[memory.remember] {_MEM_PROVIDER} extraction failed ({e!r}), trying fallback")
+
+    try:
+        _check_and_bump_cap(_MEM_FALLBACK_PROVIDER)
+        _m_fallback().add(message, user_id=RUK, metadata={"role": role})
+    except CapExceeded as e:
+        log(f"[memory.remember] fallback {_MEM_FALLBACK_PROVIDER} also capped, message stays in chat_log only: {e}")
+    except Exception as e:
+        log(f"[memory.remember] fallback {_MEM_FALLBACK_PROVIDER} also failed, message stays in chat_log only: {e!r}")
 
 
 def recall(query: str, limit: int = 5) -> list[str]:

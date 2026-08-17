@@ -468,10 +468,47 @@ def remove_mastery_job(job_ref: str) -> str:
             else f"Ruk, '{job_ref}' naam/id ka Hermes job nahi mila.")
 
 
+def real_hermes_providers() -> set[str]:
+    """The actual set of provider names Hermes's cron runtime recognizes --
+    confirmed by reading the real installed hermes-agent package, NOT
+    assumed. This is NOT the same list as Sandy's own MODELS dict
+    (llm.py) -- 'groq' is in Sandy's MODELS (works fine there, via
+    litellm) but is confirmed NOT a registered Hermes provider name.
+    Pinning a Hermes cron job to a name it doesn't recognize doesn't
+    fail loudly -- Hermes silently drops into its own separately
+    configured fallback-credential chain, which has nothing to do with
+    the container's GROQ_API_KEY/OPENAI_API_KEY env vars and produced a
+    confusing 401 that took real source-diving to actually explain."""
+    try:
+        from providers import list_providers
+        return {p.name for p in list_providers()} | {"custom"}
+    except Exception as e:
+        log(f"[mastery] couldn't read Hermes's real provider registry, allowing edit unchecked: {e!r}")
+        return set()  # empty = fail OPEN (don't block), not closed, on an internal read error
+
+
 def edit_mastery_job(job_ref: str, updates: dict) -> str:
     """Real param edit on an EXISTING Hermes job -- e.g. change which
     provider/model it uses. Anything Hermes's own update_job() accepts
-    (schedule, repeat, provider, model, prompt, etc)."""
+    (schedule, repeat, provider, model, prompt, etc).
+
+    Validates `provider` against Hermes's REAL registry first -- real bug
+    hit live: Ruk pinned a job to provider="groq" (a name Sandy's own
+    MODELS dict has, reasonably assumed to be universal), Hermes accepted
+    it with no error, and it silently resolved through an unrelated
+    fallback-credential path that failed with a confusing 401 two chat
+    turns later. Refusing an unrecognized name up front, with the real
+    list of what actually works, prevents this exact failure class
+    instead of just diagnosing it after the fact."""
+    if "provider" in updates:
+        real_providers = real_hermes_providers()
+        if real_providers and updates["provider"] not in real_providers:
+            others = ", ".join(sorted(real_providers - {"custom"}))
+            return (
+                f"Ruk, '{updates['provider']}' Hermes ka real provider nahi hai (confirmed seedha Hermes ke apne "
+                f"provider registry se) -- isko pin karne se job silently ek alag fallback path pe chala jaata, "
+                f"jaisa pichli baar 401 error mein hua. Real options: {others}."
+            )
     try:
         job = resolve_job_ref(job_ref)
     except AmbiguousJobReference as e:
