@@ -23,6 +23,8 @@ import re
 from llm import MODELS, log
 from projects import send_whatsapp
 
+_TABLE = "healing_ledger"
+
 _PATTERNS = [
     (re.compile(r"no longer available to new users|is deprecated|model.*not.?found", re.I),
      "Model deprecated/discontinued by the provider", "model_fallback"),
@@ -77,15 +79,14 @@ def propose_fix(diag: dict, job: dict | None = None) -> dict | None:
 
 
 def check_for_new_failures() -> list[dict]:
-    """Compares current job states against the last-seen snapshot
-    (persisted in sandy_config -- survives restarts) and fires only on a
-    REAL transition into failure, not on every poll of an already-known
-    one (would otherwise re-alert Ruk every few minutes forever)."""
+    """Compares current job states against the healing_ledger (real
+    table, not a jsonb dedup blob) and fires only on a REAL new failure
+    -- an unresolved ledger row already matching this job_ref + root
+    cause means Ruk's already been told, don't re-alert every poll."""
     import config
     import mastery
     import native_mastery
 
-    seen = config.get_config("healing_seen_failures") or {}
     alerts = []
     all_jobs = []
     try:
@@ -96,60 +97,44 @@ def check_for_new_failures() -> list[dict]:
         log(f"[healing] hermes job list read failed: {e!r}")
     all_jobs += native_mastery.status_shape()
 
+    client = config.get_client()
     for j in all_jobs:
         jid = j["id"]
         error_text = j.get("last_error") or ""
         is_failing = bool(error_text) or j.get("state") == "failed"
         if not is_failing:
             continue
-        fingerprint = str(hash(error_text or j.get("state")))
-        if seen.get(jid) == fingerprint:
-            continue  # already alerted on this exact failure
         diag = classify_error(error_text or "job state is 'failed', no error text captured", entity=j.get("name") or "unknown")
+        existing = (
+            client.table(_TABLE).select("id")
+            .eq("job_ref", jid).eq("root_cause", diag["root_cause"]).eq("is_resolved", False)
+            .limit(1).execute()
+        )
+        if existing.data:
+            continue  # already have an open ledger row for this exact failure
         fix = propose_fix(diag, job=j)
         alerts.append({"job": j, "diag": diag, "fix": fix})
-        seen[jid] = fingerprint
-
-    if alerts:
-        config.set_config("healing_seen_failures", seen)
     return alerts
 
 
-def _pending_index_key() -> str:
-    return "healing_pending_ids"
-
-
 def alert_and_store(alerts: list[dict]) -> None:
-    """Sends the real WhatsApp alert (best-effort) AND stores a full
-    record -- root cause + fix, or root cause alone if there's no safe
-    auto-fix -- so a later 'haan'/'fix it' in chat can apply it, and so
-    main.py's chat pipeline can surface it even if WhatsApp silently
-    isn't configured (confirmed from Ruk's own logs it currently isn't --
-    chat is the channel that can never silently fail to reach him the
-    way an unconfigured webhook/secret can).
-
-    Maintains its OWN index (healing_pending_ids) rather than reusing
-    healing_seen_failures -- real bug found via actual testing: this
-    function is called from TWO places (the poller's
-    check_for_new_failures, AND native_mastery.py's direct in-process
-    alert on a live exception, which never touches
-    healing_seen_failures at all). Piggy-backing the pending-fix index on
-    the poller's own dedup state meant a native job's failure record was
-    written but permanently undiscoverable by list_pending_fixes(). This
-    index is now updated here, the one real place a record is created,
-    regardless of which caller triggered it."""
+    """Sends the real WhatsApp alert (best-effort) AND inserts a real row
+    into healing_ledger -- root cause + fix, or root cause alone if
+    there's no safe auto-fix -- so a later 'haan'/'fix it' in chat can
+    apply it, and so main.py's chat pipeline can surface it even if
+    WhatsApp silently isn't configured (confirmed from Ruk's own logs it
+    currently isn't -- chat is the channel that can never silently fail
+    to reach him the way an unconfigured webhook/secret can)."""
     import config
 
-    ids = set(config.get_config(_pending_index_key()) or [])
+    client = config.get_client()
     for a in alerts:
         j, diag, fix = a["job"], a["diag"], a["fix"]
-        record = {
-            "job_ref": j["id"], "job_name": j.get("name", j["id"]),
-            "root_cause": diag["root_cause"], "updates": fix["updates"] if fix else None,
-        }
-        config.set_config(f"pending_fix:{j['id']}", record)
-        ids.add(j["id"])
-        lines = [f"Ruk, real problem mili -- '{record['job_name']}' ({record['job_ref']}):", f"KYA HUA: {record['root_cause']}"]
+        client.table(_TABLE).insert({
+            "job_ref": j["id"], "job_name": j.get("name", j["id"]), "engine": j.get("engine", "hermes"),
+            "root_cause": diag["root_cause"], "proposed_updates": fix["updates"] if fix else None,
+        }).execute()
+        lines = [f"Ruk, real problem mili -- '{j.get('name', j['id'])}' ({j['id']}):", f"KYA HUA: {diag['root_cause']}"]
         if fix:
             lines.append(f"PROPOSED FIX: {fix['updates']} -- chat me 'haan'/'fix it' bolo, apply kar dungi.")
         else:
@@ -158,7 +143,6 @@ def alert_and_store(alerts: list[dict]) -> None:
         log(f"[healing] {msg}")
         if not send_whatsapp(msg):
             log(f"[healing] WhatsApp send failed or not configured (check RUK_WHATSAPP_NUMBER/WHATSAPP_TOKEN/WHATSAPP_PHONE_NUMBER_ID in HF secrets) -- alert only reached server logs for {j['id']}, chat will still surface it")
-    config.set_config(_pending_index_key(), list(ids))
 
 
 def run_check_and_alert() -> list[dict]:
@@ -169,17 +153,21 @@ def run_check_and_alert() -> list[dict]:
     return alerts
 
 
+def _row_to_fix(row: dict) -> dict:
+    """Ledger row -> the {job_ref, job_name, root_cause, updates} shape
+    main.py already expects -- keeps every caller in main.py unchanged."""
+    return {
+        "job_ref": row["job_ref"], "job_name": row["job_name"],
+        "root_cause": row["root_cause"], "updates": row.get("proposed_updates"),
+    }
+
+
 def list_pending_fixes() -> list[dict]:
-    """Every real unresolved failure record -- {job_ref, job_name,
-    root_cause, updates (None if no safe auto-fix exists)}."""
+    """Every real unresolved failure -- {job_ref, job_name, root_cause,
+    updates (None if no safe auto-fix exists)}."""
     import config
-    ids = config.get_config(_pending_index_key()) or []
-    out = []
-    for jid in ids:
-        record = config.get_config(f"pending_fix:{jid}")
-        if record:
-            out.append(record)
-    return out
+    res = config.get_client().table(_TABLE).select("*").eq("is_resolved", False).execute()
+    return [_row_to_fix(r) for r in res.data]
 
 
 def list_announced_pending_fixes() -> list[dict]:
@@ -190,8 +178,8 @@ def list_announced_pending_fixes() -> list[dict]:
     reason -- a real edge case, not a hypothetical one, given "haan"/
     "yes" alone triggers this."""
     import config
-    announced = set(config.get_config("healing_chat_announced") or [])
-    return [f for f in list_pending_fixes() if f["job_ref"] in announced]
+    res = config.get_client().table(_TABLE).select("*").eq("is_resolved", False).eq("announced_in_chat", True).execute()
+    return [_row_to_fix(r) for r in res.data]
 
 
 def list_unannounced_fixes() -> list[dict]:
@@ -200,33 +188,29 @@ def list_unannounced_fixes() -> list[dict]:
     best-effort WhatsApp send worked, since that can silently fail
     (confirmed it currently does) and chat must not rely on it."""
     import config
-    announced = set(config.get_config("healing_chat_announced") or [])
-    return [f for f in list_pending_fixes() if f["job_ref"] not in announced]
+    res = config.get_client().table(_TABLE).select("*").eq("is_resolved", False).eq("announced_in_chat", False).execute()
+    return [_row_to_fix(r) for r in res.data]
 
 
 def mark_announced(job_ref: str) -> None:
     import config
-    announced = set(config.get_config("healing_chat_announced") or [])
-    announced.add(job_ref)
-    config.set_config("healing_chat_announced", list(announced))
+    config.get_client().table(_TABLE).update({"announced_in_chat": True}).eq("job_ref", job_ref).eq("is_resolved", False).execute()
 
 
 def pop_pending_fix(job_id: str) -> dict | None:
+    """Marks every currently-unresolved ledger row for this job_ref as
+    resolved (a real fix just got applied -- whatever was open for this
+    job is superseded by that). Returns the row that was there, for the
+    caller's own record-keeping."""
     import config
-    record = config.get_config(f"pending_fix:{job_id}")
-    if record:
-        # scode: real bug found live -- set_config(key, None) crashes
-        # (Postgres 23502) because sandy_config.value is NOT NULL.
-        # delete_config actually removes the row instead of trying to
-        # write a null into a column that can't hold one.
-        config.delete_config(f"pending_fix:{job_id}")
-        ids = set(config.get_config(_pending_index_key()) or [])
-        ids.discard(job_id)
-        config.set_config(_pending_index_key(), list(ids))
-        # Clear the announced flag too -- otherwise a FUTURE new failure
-        # on this same job_id would be silently suppressed by a stale
-        # "already shown" marker from a previous, now-resolved failure.
-        announced = set(config.get_config("healing_chat_announced") or [])
-        announced.discard(job_id)
-        config.set_config("healing_chat_announced", list(announced))
-    return record
+    client = config.get_client()
+    existing = client.table(_TABLE).select("*").eq("job_ref", job_id).eq("is_resolved", False).execute()
+    if not existing.data:
+        return None
+    client.table(_TABLE).update({"is_resolved": True, "resolved_at": _now_iso()}).eq("job_ref", job_id).eq("is_resolved", False).execute()
+    return _row_to_fix(existing.data[0])
+
+
+def _now_iso() -> str:
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()

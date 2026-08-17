@@ -22,10 +22,20 @@ python3 -c "import config; config.restore_hermes_jobs()" || echo "[entrypoint] j
 supervisord -c /app/supervisord.conf &
 SUPERVISOR_PID=$!
 
+# Gateway now logs to real files (supervisord.conf), not /dev/stdout
+# directly, so Sandy's own process can read them (diagnostics.py). Tail
+# both back out to this script's own stdout/stderr so HF's live log
+# viewer still shows everything exactly as before -- nothing lost.
+touch /tmp/hermes_gateway.log /tmp/hermes_gateway.err.log
+tail -F /tmp/hermes_gateway.log &
+TAIL_OUT_PID=$!
+tail -F /tmp/hermes_gateway.err.log >&2 &
+TAIL_ERR_PID=$!
+
 uvicorn main:app --host 0.0.0.0 --port 7860 &
 FASTAPI_PID=$!
 
-trap 'kill -TERM $FASTAPI_PID 2>/dev/null; kill -TERM $SUPERVISOR_PID 2>/dev/null' TERM INT
+trap 'kill -TERM $FASTAPI_PID 2>/dev/null; kill -TERM $SUPERVISOR_PID 2>/dev/null; kill -TERM $TAIL_OUT_PID $TAIL_ERR_PID 2>/dev/null' TERM INT
 
 # Only FastAPI's exit reaches this line — a gateway crash is fully
 # absorbed by supervisord above and never triggers shutdown.
@@ -33,5 +43,6 @@ wait $FASTAPI_PID
 EXIT_CODE=$?
 echo "[entrypoint] FastAPI exited (code $EXIT_CODE) -> shutting down gateway"
 kill -TERM $SUPERVISOR_PID 2>/dev/null
+kill -TERM $TAIL_OUT_PID $TAIL_ERR_PID 2>/dev/null
 wait $SUPERVISOR_PID 2>/dev/null
 exit $EXIT_CODE

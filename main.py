@@ -21,6 +21,7 @@ from pydantic import BaseModel
 import chatlog
 import codebase
 import config
+import diagnostics
 import healing
 import search
 from identity import SANDY_SYSTEM_PROMPT, CAPABILITIES
@@ -271,11 +272,18 @@ def classify_message(message: str, pending_skill: str | None = None) -> dict:
         "INCLUDES questions about a specific feature's code/files -- 'what's new in the "
         "mastery code', 'read mastery.py/brain.py and explain what changed', 'explain your "
         "OSINT code' -- even when the feature name matches another axis's name.\n"
-        "- logs_request: true only if asking about Sandy's recent RUNTIME logs/errors/what "
-        "went wrong while running -- not her source code.\n"
+        "- logs_request: true if Ruk is asking why something in Sandy's own systems failed/"
+        "broke/errored, asking to check/research/investigate/diagnose an internal problem "
+        "(a job, a cron run, an API call, a crash), or asking about her recent runtime logs -- "
+        "not her source code (that's codebase_analysis). This covers 'research why is this "
+        "happening', 'sandy can you fix this error', 'whats causing this' when the subject is "
+        "clearly an internal failure already visible in this conversation, not source code.\n"
         "- search_needed: true if answering well requires current/external info from the web "
         "(current events, specific facts, research, competitor info) rather than reasoning/"
-        "writing from existing knowledge.\n"
+        "writing from existing knowledge. NEVER true at the same time as logs_request -- an "
+        "internal error in Sandy's own systems is diagnosed from her own real logs, never from "
+        "a web search, no matter how the question is phrased ('research why this is failing' "
+        "about an internal job/API failure is logs_request, not search_needed).\n"
         "- llm_override: set ONLY if the message explicitly names WHICH model to use for the "
         "task (not what the task is). Valid: " + ", ".join(providers) + ", or 'orchestrator' "
         "for full multi-round mode. If no model is named, use null.\n"
@@ -392,6 +400,15 @@ def classify_message(message: str, pending_skill: str | None = None) -> dict:
     else:
         hermes_job_edit = None
 
+    logs_req = bool(data.get("logs_request"))
+    # Hard structural guard, not just a prompt instruction -- even if the
+    # classifier mis-flags both true on some future phrasing, logs_request
+    # always wins. This is the actual fix for the live failure: "research
+    # why is this happening" (an internal job failure) got search_needed
+    # instead, and Sandy hallucinated from random web results about
+    # "unrestricted API keys" instead of reading her own real logs.
+    search_needed = bool(data.get("search_needed")) and not logs_req
+
     return {
         "config_change": cfg,
         "selfmod": selfmod_req,
@@ -400,8 +417,8 @@ def classify_message(message: str, pending_skill: str | None = None) -> dict:
         "mastery_control": mastery_control,
         "hermes_job_edit": hermes_job_edit,
         "codebase_analysis": bool(data.get("codebase_analysis")),
-        "logs_request": bool(data.get("logs_request")),
-        "search_needed": bool(data.get("search_needed")),
+        "logs_request": logs_req,
+        "search_needed": search_needed,
         "llm_override": override,
         "complexity": complexity,
         "job_status_request": bool(data.get("job_status_request")),
@@ -980,15 +997,25 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
 
     if cls["logs_request"]:
         _remember(background_tasks, req.message, role="user")
-        logs = codebase.read_recent_logs()
+        # Enhanced with real Hermes gateway logs + env key presence +
+        # git state -- previously this only ever read Sandy's OWN
+        # process log, completely blind to the separate gateway
+        # subprocess where things like the groq-auth 401 traceback
+        # actually lived. This is also the concrete answer to "why
+        # couldn't Sandy figure this out" -- she now has a real way to.
+        logs = diagnostics.inspect_system_health()
+        git_info = diagnostics.git_push_summary()
         reply = call_llm(
             "gemini",
             [
                 {"role": "system", "content": SANDY_SYSTEM_PROMPT},
                 {
                     "role": "user",
-                    "content": f"Ruk's question: {req.message}\n\nYour recent runtime log:\n{logs}\n\n"
-                    "Answer in Hinglish, referencing what's actually in the log above.",
+                    "content": f"Ruk's question: {req.message}\n\nYour real internal diagnostics this turn:\n{logs}\n\n"
+                    f"Latest real deployment state:\n{git_info}\n\n"
+                    "Answer in Hinglish, grounded ONLY in what's actually in the diagnostics/logs above -- "
+                    "if the real cause isn't visible in them, say so plainly instead of guessing. Never invent "
+                    "an explanation an external web search might produce for an internal error like this.",
                 },
             ],
         )

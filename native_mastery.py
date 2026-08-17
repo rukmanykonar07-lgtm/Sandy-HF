@@ -20,13 +20,14 @@ Full lifecycle Ruk actually wants (per his spec):
   models automatically. Every real step is a real event.py row -- same
   data the orb graph and (via list_jobs below) Workflows/Agents render.
 
-Jobs are stored in the SAME sandy_config Supabase table everything else
-uses (one jsonb row per job, key f"native_job:{id}", plus an index list
-under "native_job_index") -- not a new table, not an in-memory dict.
-A job surviving HF container sleep/restart between propose and confirm
-(or mid-pause) is the whole point; an in-memory dict was the exact
-cause of "confirmed" silently falling into a hallucinated fake job
-before this rewrite.
+Jobs are stored in a REAL relational table, native_mastery_jobs (real
+columns, real types -- see migration_rdbms.sql) -- not a jsonb blob
+under a generic key-value store. A job surviving HF container
+sleep/restart between propose and confirm (or mid-pause) is the whole
+point; an in-memory dict was the exact cause of "confirmed" silently
+falling into a hallucinated fake job before the first rewrite, and the
+jsonb-blob approach worked but wasn't real relational storage, which is
+what this table now is.
 """
 import random
 import re
@@ -39,28 +40,27 @@ from identity import SANDY_SYSTEM_PROMPT
 from llm import call_llm_with_fallback, log, MODELS
 
 _IDENTITY_MSG = {"role": "system", "content": SANDY_SYSTEM_PROMPT}
+_TABLE = "native_mastery_jobs"
 
 
-# --- persistence ------------------------------------------------------
-
-def _job_key(job_id: str) -> str:
-    return f"native_job:{job_id}"
-
-
-def _index_key() -> str:
-    return "native_job_index"  # list of job ids, newest first
-
+# --- persistence (real Postgres table, not a jsonb blob) ---------------
 
 def _save_job(job: dict) -> None:
-    config.set_config(_job_key(job["id"]), job)
-    idx = config.get_config(_index_key()) or []
-    if job["id"] not in idx:
-        idx.insert(0, job["id"])
-        config.set_config(_index_key(), idx)
+    """Real upsert -- job["id"] is the primary key. Every field on the
+    job dict maps directly to a real column (see migration_rdbms.sql)."""
+    row = {k: v for k, v in job.items() if k != "updated_at"}
+    row["updated_at"] = _now_iso()
+    config.get_client().table(_TABLE).upsert(row).execute()
+
+
+def _now_iso() -> str:
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
 def get_job(job_id: str) -> dict | None:
-    return config.get_config(_job_key(job_id))
+    res = config.get_client().table(_TABLE).select("*").eq("id", job_id).execute()
+    return res.data[0] if res.data else None
 
 
 def list_jobs() -> list[dict]:
@@ -68,29 +68,30 @@ def list_jobs() -> list[dict]:
     Home's Workflows/Agents tabs, which previously only ever showed
     Hermes jobs because native runs had nowhere to register themselves
     at all. Real data, same discipline as mastery.list_mastery_jobs()."""
-    idx = config.get_config(_index_key()) or []
-    out = []
-    for jid in idx:
-        j = config.get_config(_job_key(jid))
-        if j and j.get("state") != "removed":
-            out.append(j)
-    return out
+    res = (
+        config.get_client().table(_TABLE).select("*")
+        .neq("state", "removed").order("created_at", desc=True).execute()
+    )
+    return res.data
 
 
 def get_pending_native_plan(session_id: str) -> dict | None:
     """Back-compat shape for main.py's existing pending-plan routing --
     finds this session's most recent job still in 'proposed' state."""
-    for j in list_jobs():
-        if j.get("session_id") == session_id and j.get("state") == "proposed":
-            return j
-    return None
+    res = (
+        config.get_client().table(_TABLE).select("*")
+        .eq("session_id", session_id).eq("state", "proposed")
+        .order("created_at", desc=True).limit(1).execute()
+    )
+    return res.data[0] if res.data else None
 
 
 def latest_job_for_session(session_id: str, state: str | None = None) -> dict | None:
-    for j in list_jobs():
-        if j.get("session_id") == session_id and (state is None or j.get("state") == state):
-            return j
-    return None
+    q = config.get_client().table(_TABLE).select("*").eq("session_id", session_id)
+    if state is not None:
+        q = q.eq("state", state)
+    res = q.order("created_at", desc=True).limit(1).execute()
+    return res.data[0] if res.data else None
 
 
 def job_diagnostics(job_id: str) -> str:
@@ -375,11 +376,7 @@ def remove(job_id: str) -> str:
     if not job:
         return f"Ruk, native job {job_id} nahi mila."
     job["state"] = "removed"
-    _save_job(job)
-    idx = config.get_config(_index_key()) or []
-    if job_id in idx:
-        idx.remove(job_id)
-        config.set_config(_index_key(), idx)
+    _save_job(job)  # soft-delete -- list_jobs() already filters state='removed' out
     return f"Ruk, native job {job_id} remove kar diya."
 
 

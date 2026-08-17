@@ -76,6 +76,14 @@ def get_all_config() -> dict:
     return {**DEFAULTS, **stored}
 
 
+def get_client() -> Client:
+    """Real Supabase client, for modules that own their own proper
+    relational tables (native_mastery.py, healing.py) instead of the
+    generic sandy_config key-value store. Public wrapper around _db() --
+    other modules shouldn't reach into a "_private" function."""
+    return _db()
+
+
 if __name__ == "__main__":
     # ponytail self-check: not a real network test (needs live Supabase),
     # just confirms defaults shape is sane before anything imports this.
