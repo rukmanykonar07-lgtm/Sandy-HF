@@ -647,7 +647,7 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
         except RuntimeError as e:
             reply = f"Ruk, transcript nahi mil paya: {e}"
         else:
-            reply = call_llm(
+            reply = call_llm_with_fallback(
                 "gemini",
                 [
                     {"role": "system", "content": SANDY_SYSTEM_PROMPT},
@@ -660,6 +660,19 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
                     },
                 ],
             )
+        _remember(background_tasks, reply, role="assistant")
+        return ChatResponse(reply=reply)
+
+    if _is_trivial(req.message):
+        # scode: real, verified inefficiency -- classify_message()'s full
+        # ~15-field JSON schema call was firing on EVERY message, including
+        # "hi"/"thanks" -- the exact "tries to do everything every time,
+        # even when she doesn't need to" pattern Ruk described. _is_trivial
+        # already existed (used to gate Mem0 extraction) but was never used
+        # to skip the classifier itself. A trivial greeting needs one cheap
+        # reply, not a full intent-extraction pass.
+        _remember(background_tasks, req.message, role="user")
+        reply = call_llm_with_fallback("groq", [{"role": "system", "content": SANDY_SYSTEM_PROMPT}, {"role": "user", "content": req.message}])
         _remember(background_tasks, reply, role="assistant")
         return ChatResponse(reply=reply)
 
@@ -893,7 +906,7 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
             if cls["capabilities_request"]:
                 grounding.append(CAPABILITIES)
             try:
-                parts.append(call_llm(
+                parts.append(call_llm_with_fallback(
                     "gemini",
                     [
                         {"role": "system", "content": SANDY_SYSTEM_PROMPT},
@@ -1005,7 +1018,7 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
         # couldn't Sandy figure this out" -- she now has a real way to.
         logs = diagnostics.inspect_system_health()
         git_info = diagnostics.git_push_summary()
-        reply = call_llm(
+        reply = call_llm_with_fallback(
             "gemini",
             [
                 {"role": "system", "content": SANDY_SYSTEM_PROMPT},
@@ -1108,7 +1121,7 @@ def new_chat():
         summary = "Koi naya kaam nahi hua pichhle reset ke baad, Ruk."
     else:
         convo = "\n".join(f"{m['role']}: {m['message']}" for m in since_last)
-        summary = call_llm(
+        summary = call_llm_with_fallback(
             "gemini",
             [{
                 "role": "user",
@@ -1125,7 +1138,52 @@ def new_chat():
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    """Real dependency checks -- confirmed bug: this endpoint used to
+    unconditionally return {"status": "ok"} the ENTIRE time the
+    native_mastery_jobs/healing_ledger schema mismatch was breaking every
+    job-related feature. Cheap on purpose (one lightweight query per
+    table, not a heavy diagnostic dump) -- for the full picture on
+    demand, that's inspect_system_health() via the logs_request path."""
+    checks = {}
+    overall_ok = True
+
+    try:
+        client = config.get_client()
+        for table in ("sandy_config", "mastery_events", "native_mastery_jobs", "healing_ledger"):
+            try:
+                client.table(table).select("*").limit(1).execute()
+                checks[table] = "ok"
+            except Exception as e:
+                checks[table] = f"MISSING or unreachable: {e}"
+                overall_ok = False
+    except Exception as e:
+        checks["supabase"] = f"client init failed: {e}"
+        overall_ok = False
+
+    try:
+        from cron.jobs import get_ticker_heartbeat_age
+        hb = get_ticker_heartbeat_age()
+        if hb is None:
+            checks["hermes_gateway"] = "no heartbeat file -- ticker may never have run"
+            overall_ok = False
+        elif hb > 180:
+            checks["hermes_gateway"] = f"heartbeat {int(hb)}s old -- likely dead"
+            overall_ok = False
+        else:
+            checks["hermes_gateway"] = "ok"
+    except Exception as e:
+        checks["hermes_gateway"] = f"check failed: {e!r}"
+        overall_ok = False
+
+    try:
+        missing = [k for k, present in diagnostics.env_key_matrix().items() if not present]
+        # Informational only -- some keys (WhatsApp) are known-optional,
+        # so a missing one shouldn't flip the whole app to "degraded".
+        checks["env_keys"] = "ok" if not missing else f"missing (may be optional): {missing}"
+    except Exception as e:
+        checks["env_keys"] = f"check failed: {e!r}"
+
+    return {"status": "ok" if overall_ok else "degraded", "checks": checks}
 
 
 @app.get("/history")
@@ -1189,7 +1247,7 @@ async def mastery_graph_explain(run_id: str, req: Request):
         for e in run_events
     )
     try:
-        answer = call_llm(
+        answer = call_llm_with_fallback(
             "gemini",
             [
                 {"role": "system", "content": SANDY_SYSTEM_PROMPT},

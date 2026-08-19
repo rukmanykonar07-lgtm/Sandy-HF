@@ -35,10 +35,32 @@ _HISTORY_FRAME = {
 }
 
 
+HISTORY_WINDOW = 10  # last N messages (~5 user/assistant turns), not the raw 30
+# main.py fetches. scode: real, measured problem -- 30 raw messages were
+# getting attached to EVERY call in a tier (2-3x for medium/complex, and
+# for _orchestrate specifically -- plan call + every worker + every gap-
+# round worker, sometimes 8-15+ real calls for one user turn), each one
+# repeating the identical block. Confirmed by current (2026) production
+# guidance too: "the orchestrator accumulates context from every worker
+# -- at 4+ workers this frequently exceeds window limits." 5 turns is
+# enough for real immediate context (a follow-up referencing 2-3
+# messages back still works); anything older than that is what Mem0
+# (long-term recall) already exists to handle -- keeping a huge window
+# "just in case" would just reintroduce the exact bloat this fixes.
+# Scoped ONLY to what gets sent to the LLM -- main.py's own
+# chatlog.get_history(limit=30) for the /history UI endpoint is
+# untouched, Ruk still sees his full real chat log either way.
+
+
 def _with_history(history: list[dict] | None) -> list[dict]:
     """Wraps history with clear framing so it can't get mistaken for the
-    current question. Empty list if there's no history to frame."""
-    return [_HISTORY_FRAME] + history if history else []
+    current question. Empty list if there's no history to frame. Only
+    the last HISTORY_WINDOW messages -- see the module-level comment
+    above for the real, measured reason."""
+    if not history:
+        return []
+    trimmed = history[-HISTORY_WINDOW:]
+    return [_HISTORY_FRAME] + trimmed
 
 TIERS = {
     "simple": ["groq"],

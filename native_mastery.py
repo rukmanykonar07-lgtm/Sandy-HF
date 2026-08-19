@@ -31,6 +31,7 @@ what this table now is.
 """
 import random
 import re
+import threading
 
 import brain
 import config
@@ -41,6 +42,88 @@ from llm import call_llm_with_fallback, log, MODELS
 
 _IDENTITY_MSG = {"role": "system", "content": SANDY_SYSTEM_PROMPT}
 _TABLE = "native_mastery_jobs"
+
+# Real race condition, found by deliberately walking through concurrency
+# scenarios (not hit by chance): _orchestrate() runs multiple workers for
+# the SAME job concurrently via ThreadPoolExecutor. _bump_usage does a
+# read-modify-write (get_job -> mutate dict -> _save_job) -- two workers
+# finishing at the same instant can both read usage=N, both compute N+1,
+# both write N+1, and one real increment silently vanishes. For a job
+# with a real per-provider cap set, that means Ruk's own cap is quietly
+# enforced less accurately than it looks, with no error anywhere.
+#
+# A per-job threading.Lock (not a DB-level lock/RPC) is the right-sized
+# fix: all the concurrency here is ThreadPoolExecutor workers inside ONE
+# Python process (HF Spaces runs a single container) -- there's no
+# multi-instance/distributed concurrency to defend against, so adding
+# Postgres-level atomic increment machinery would be solving a problem
+# that doesn't exist at this scale.
+#
+# Honest limit this does NOT close: the provider_guard CHECK (before a
+# call starts) and the bump (after it finishes) are still two separate
+# moments -- two workers can both pass the cap check a moment apart, then
+# both bump, overshooting the cap by a small amount in a rare near-
+# simultaneous case. Caps here are a soft spend guardrail, not a hard
+# billing limit, so this residual gap is an accepted tradeoff, not
+# something silently ignored -- fully closing it would mean holding a
+# lock across the entire external LLM call (real latency), which isn't
+# worth it for a soft internal guardrail. This fix closes the definitely-
+# worse bug (silently LOSING real usage counts), not the boundary case.
+#
+# SECOND real race found the same way (scenario-walking, then confirmed
+# with an actual concurrent test, not assumed): _run()'s finishing write
+# reads the job early, does the whole orchestrator run, then saves the
+# WHOLE job dict back -- if pause()/resume() write a different state
+# while _run() is mid-flight, _run()'s stale in-memory copy silently
+# overwrites the ENTIRE row (not just state) when it finally saves. This
+# is worse than the usage race: it can clobber a real pause, not just
+# undercount a number. Confirmed with a real threaded test before fixing.
+#
+# One lock, generalized to guard every real read-modify-write on a job
+# (usage bumps AND state transitions) -- not two separate locking
+# schemes for what's the same underlying problem.
+_job_locks: dict[str, threading.Lock] = {}
+_job_locks_guard = threading.Lock()
+
+
+def _get_job_lock(job_id: str) -> threading.Lock:
+    with _job_locks_guard:
+        if job_id not in _job_locks:
+            _job_locks[job_id] = threading.Lock()
+        return _job_locks[job_id]
+
+
+# Explicit transition table -- self-documenting, and closes a real gap:
+# mark_done() previously had NO guard at all, so it could mark a job
+# that was still 'proposed' (never even started) as 'done'.
+_ALLOWED_TRANSITIONS = {
+    "pause": {"running", "scheduled_waiting"},
+    "resume": {"paused"},
+    "continue_now": {"scheduled_waiting"},
+    "mark_done": {"running", "paused", "scheduled_waiting"},
+}
+
+
+def _atomic_transition(job_id: str, action: str, mutate) -> tuple[dict | None, str | None]:
+    """Locked, validated read-modify-write -- every real state change
+    goes through this one path instead of a scattered ad-hoc
+    read-check-write per function. Re-reads the job FRESH inside the
+    lock (not whatever the caller already had in memory), so this closes
+    the exact race described above for every caller, not just _run().
+
+    mutate(job) -> job: applies the actual change to a job dict already
+    confirmed to be in a valid starting state.
+    Returns (updated_job, None) on success, or (None, error_message)."""
+    with _get_job_lock(job_id):
+        job = get_job(job_id)
+        if not job:
+            return None, f"Ruk, native job {job_id} nahi mila."
+        allowed = _ALLOWED_TRANSITIONS.get(action)
+        if allowed is not None and job["state"] not in allowed:
+            return None, f"Ruk, {job_id} abhi '{job['state']}' state me hai, {action} abhi valid nahi hai."
+        job = mutate(job)
+        _save_job(job)
+        return job, None
 
 
 # --- persistence (real Postgres table, not a jsonb blob) ---------------
@@ -319,13 +402,9 @@ def confirm_native_plan(session_id: str, background_tasks=None) -> tuple[str, st
 
 
 def pause(job_id: str) -> str:
-    job = get_job(job_id)
-    if not job:
-        return f"Ruk, native job {job_id} nahi mila."
-    if job["state"] not in ("running", "scheduled_waiting"):
-        return f"Ruk, {job_id} abhi '{job['state']}' state me hai, pause karne layak nahi hai."
-    job["state"] = "paused"
-    _save_job(job)
+    job, err = _atomic_transition(job_id, "pause", lambda j: {**j, "state": "paused"})
+    if err:
+        return err
     events.log_event(job_id, "sandy", "obstacle", "Run paused by Ruk", round=job.get("round", 0))
     return (
         f"Ruk, native job {job_id} pause ho gaya. Real pause point round ke beech me nahi, "
@@ -335,11 +414,12 @@ def pause(job_id: str) -> str:
 
 
 def resume(job_id: str, background_tasks=None) -> str:
-    job = get_job(job_id)
-    if not job or job["state"] != "paused":
-        return f"Ruk, {job_id} paused state me nahi hai, resume nahi kar sakti (abhi: {job['state'] if job else 'not found'})."
-    job["state"] = "running" if job["mode"] == "continuous" else "scheduled_waiting"
-    _save_job(job)
+    def _mutate(j):
+        j["state"] = "running" if j["mode"] == "continuous" else "scheduled_waiting"
+        return j
+    job, err = _atomic_transition(job_id, "resume", _mutate)
+    if err:
+        return err
     events.log_event(job_id, "sandy", "planning", "Run resumed by Ruk", round=job.get("round", 0))
     if job["mode"] == "continuous" and background_tasks is not None:
         background_tasks.add_task(_run, job_id)
@@ -352,31 +432,29 @@ def continue_now(job_id: str, background_tasks=None) -> str:
     before -- there is no cron/ticker for native jobs, Ruk saying
     'continue' IS the trigger, on purpose (matches his own request to
     control exactly when a scheduled job advances)."""
-    job = get_job(job_id)
-    if not job or job.get("state") != "scheduled_waiting":
-        return f"Ruk, {job_id} abhi continue karne layak state me nahi hai (state: {job['state'] if job else 'not found'})."
-    job["state"] = "running"
-    _save_job(job)
+    job, err = _atomic_transition(job_id, "continue_now", lambda j: {**j, "state": "running"})
+    if err:
+        return err
     if background_tasks is not None:
         background_tasks.add_task(_run, job_id)
     return f"Ruk, {job_id} ka agla chunk chal raha hai ab."
 
 
 def mark_done(job_id: str) -> str:
-    job = get_job(job_id)
-    if not job:
-        return f"Ruk, native job {job_id} nahi mila."
-    job["state"] = "done"
-    _save_job(job)
+    job, err = _atomic_transition(job_id, "mark_done", lambda j: {**j, "state": "done"})
+    if err:
+        return err
     return f"Ruk, {job_id} done mark kar diya."
 
 
 def remove(job_id: str) -> str:
-    job = get_job(job_id)
-    if not job:
-        return f"Ruk, native job {job_id} nahi mila."
-    job["state"] = "removed"
-    _save_job(job)  # soft-delete -- list_jobs() already filters state='removed' out
+    # No allowed_from restriction -- valid from ANY state, on purpose
+    # (an explicit Ruk-directed delete shouldn't be blocked by state).
+    # Still goes through the same lock so it can't race a concurrent
+    # _run() finishing write the same way pause() could before this fix.
+    job, err = _atomic_transition(job_id, "remove", lambda j: {**j, "state": "removed"})
+    if err:
+        return err
     return f"Ruk, native job {job_id} remove kar diya."
 
 
@@ -397,13 +475,16 @@ def _make_guard(job_id: str):
 
 
 def _bump_usage(job_id: str, provider: str) -> None:
-    job = get_job(job_id)
-    if not job:
-        return
-    usage = job.get("usage") or {}
-    usage[provider] = usage.get(provider, 0) + 1
-    job["usage"] = usage
-    _save_job(job)
+    """Locked per job_id -- see the module-level comment on
+    _usage_locks for why this specific race was real, not hypothetical."""
+    with _get_job_lock(job_id):
+        job = get_job(job_id)
+        if not job:
+            return
+        usage = job.get("usage") or {}
+        usage[provider] = usage.get(provider, 0) + 1
+        job["usage"] = usage
+        _save_job(job)
 
 
 def _should_continue(job_id: str):
@@ -450,22 +531,35 @@ def _run(job_id: str) -> str:
             task, context="", on_event=on_event, workers=worker_list, extra_workers=extra,
             provider_guard=_make_guard(job_id), should_continue=_should_continue(job_id),
         )
-        job = get_job(job_id)  # re-fetch -- usage/state may have changed mid-run
-        if not job:
-            return result
-        job["result"] = result
-        job["round"] = job.get("round", 0) + 1
-        if job["state"] == "running":  # wasn't paused mid-run
-            job["state"] = "done" if job["mode"] == "continuous" else "scheduled_waiting"
-        _save_job(job)
+        # scode: THE actual race this whole locking pass exists for --
+        # confirmed live with a real threaded test before this fix: the
+        # read used to happen here, then _orchestrate ran (real time
+        # passing), then the WHOLE job dict got saved -- if pause()
+        # wrote a different state in that window, this stale save
+        # silently overwrote it entirely. The read now happens INSIDE
+        # the lock, immediately before the write, and pause()/resume()/
+        # etc. all take the SAME lock -- so whichever gets there first
+        # completes its full read+write before the other can start,
+        # and this block always sees the real current state, not a
+        # stale one from before the run started.
+        with _get_job_lock(job_id):
+            job = get_job(job_id)
+            if not job:
+                return result
+            job["result"] = result
+            job["round"] = job.get("round", 0) + 1
+            if job["state"] == "running":  # wasn't paused mid-run
+                job["state"] = "done" if job["mode"] == "continuous" else "scheduled_waiting"
+            _save_job(job)
         events.log_event(job_id, "sandy", "output", f"Native mastery run finished for \"{job['skill']}\"", detail=result)
     except Exception as e:
         log(f"[native_mastery._run] job {job_id} failed: {e!r}")
         events.log_event(job_id, "sandy", "obstacle", f"Run failed with a real error: {e}", detail=str(e))
-        job = get_job(job_id)
-        if job:
-            job["state"] = "failed"
-            _save_job(job)
+        with _get_job_lock(job_id):
+            job = get_job(job_id)
+            if job:
+                job["state"] = "failed"
+                _save_job(job)
         result = f"Run failed: {e}"
         # Real, live in-process failure -- unlike a Hermes job, we know about
         # this the INSTANT it happens, not on the next poll cycle. No auto-fix
