@@ -1143,18 +1143,40 @@ def health():
     native_mastery_jobs/healing_ledger schema mismatch was breaking every
     job-related feature. Cheap on purpose (one lightweight query per
     table, not a heavy diagnostic dump) -- for the full picture on
-    demand, that's inspect_system_health() via the logs_request path."""
+    demand, that's inspect_system_health() via the logs_request path.
+
+    Checks REAL COLUMNS per table, not just table existence -- a plain
+    select("*") never references a specific column, so it would NOT have
+    caught the exact live bug that shipped (healing_ledger existed, but
+    was missing announced_in_chat; "*" happily returns whatever columns
+    ARE there and never notices one is absent). O(1) per table, 4 tables
+    -- trivial at this scale, not worth a heavier migration-tracking
+    system for a schema this small that changes this rarely.
+
+    Each table check is independently wrapped -- a real, deliberate
+    isolation boundary (one table's schema problem must not prevent
+    reporting on the other three), not a lazy catch-all."""
     checks = {}
     overall_ok = True
 
+    # The exact columns each table's real code paths actually reference --
+    # kept here, next to the check, so it's obvious when this needs
+    # updating alongside a real schema change.
+    _EXPECTED_COLUMNS = {
+        "sandy_config": "key,value",
+        "mastery_events": "run_id,agent,round,event_type,provider,summary,detail,parent_event_id",
+        "native_mastery_jobs": "id,session_id,skill,mode,weights,caps,usage,state,plan,result,round,created_at,updated_at",
+        "healing_ledger": "job_ref,job_name,engine,root_cause,proposed_updates,is_resolved,announced_in_chat,created_at,resolved_at",
+    }
+
     try:
         client = config.get_client()
-        for table in ("sandy_config", "mastery_events", "native_mastery_jobs", "healing_ledger"):
+        for table, columns in _EXPECTED_COLUMNS.items():
             try:
-                client.table(table).select("*").limit(1).execute()
+                client.table(table).select(columns).limit(1).execute()
                 checks[table] = "ok"
             except Exception as e:
-                checks[table] = f"MISSING or unreachable: {e}"
+                checks[table] = f"MISSING table or column mismatch: {e}"
                 overall_ok = False
     except Exception as e:
         checks["supabase"] = f"client init failed: {e}"
