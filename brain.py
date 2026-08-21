@@ -285,7 +285,23 @@ def _run_tier(task: str, providers: list[str], context: str, history: list[dict]
         raise CapExceeded(str(last_error) if last_error else "all providers for this tier are capped")
     if len(answers) == 1:
         return next(iter(answers.values()))
-    return _judge(task, answers, confidences)
+    try:
+        return _judge(task, answers, confidences)
+    except Exception as e:
+        # scode: real bug found live -- _judge() had ZERO exception
+        # handling, unlike every other call site in this file. The
+        # inputs here are already real, successful answers from other
+        # providers -- if the merge/synthesis call itself fails (e.g.
+        # Cerebras billing lapsed mid-cascade), that must never crash
+        # the whole response when perfectly good answers already exist.
+        # Falls back to the highest self-reported confidence answer,
+        # or just the first real answer if no confidence was given.
+        log(f"[brain._run_tier] _judge failed ({e!r}) -- returning the best individual answer instead of crashing")
+        if confidences:
+            best = max(confidences, key=lambda p: confidences[p][0] if confidences[p][0] is not None else -1)
+            if best in answers:
+                return answers[best]
+        return next(iter(answers.values()))
 
 
 def _research_queries(topic: str, angle: str = "") -> list[str]:

@@ -11,7 +11,7 @@ agrees with itself.
 import pytest
 
 import config
-from tests.conftest import FakeSupabaseClient
+from conftest import FakeSupabaseClient
 
 
 @pytest.fixture
