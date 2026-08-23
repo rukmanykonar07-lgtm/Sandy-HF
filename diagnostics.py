@@ -24,10 +24,18 @@ _GATEWAY_ERR_LOG = "/tmp/hermes_gateway.err.log"
 # Real env vars this deployment actually uses (from requirements.txt /
 # config.py / llm.py / projects.py) -- presence-checked only, values
 # NEVER read or exposed here.
+#
+# scode: real bug fixed here -- TAVILY/EXA/LINKUP's real HF secret names
+# have NO "_API_KEY" suffix (confirmed against Ruk's actual live secrets
+# list), unlike every other provider. This function is the FIRST thing
+# Sandy checks for any internal diagnostic question -- with the wrong
+# names, it reported all three as "MISSING" every single time even
+# though they're set and search.py reads them fine, actively misleading
+# both Sandy's own diagnosis and Ruk.
 _KNOWN_KEYS = (
     "GROQ_API_KEY", "GOOGLE_API_KEY", "CEREBRAS_API_KEY",
     "SUPABASE_URL", "SUPABASE_SERVICE_KEY", "SUPABASE_KEY", "SUPABASE_DB_CONNECTION_STRING",
-    "TAVILY_API_KEY", "EXA_API_KEY", "LINKUP_API_KEY",
+    "TAVILY", "EXA", "LINKUP",
     "WHATSAPP_TOKEN", "WHATSAPP_PHONE_NUMBER_ID", "RUK_WHATSAPP_NUMBER",
 )
 

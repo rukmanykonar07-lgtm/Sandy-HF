@@ -13,6 +13,7 @@ import re
 import asyncio
 
 from fastapi import FastAPI, BackgroundTasks, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -460,6 +461,8 @@ def chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatResponse:
             blocks = []
             for f in unannounced:
                 block = f"⚠️ Ruk, ek real problem hai -- '{f['job_name']}' ({f['job_ref']}): {f['root_cause']}."
+                if f.get("research_note"):
+                    block += f"\n{f['research_note']}"
                 block += f" PROPOSED FIX: {f['updates']} -- 'haan'/'fix it' bolo." if f["updates"] else " Iska koi safe auto-fix nahi hai -- khud dekhna padega."
                 blocks.append(block)
                 healing.mark_announced(f["job_ref"])
@@ -507,6 +510,8 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
                 # something that doesn't exist -- that's the exact
                 # hallucination this whole feature is meant to prevent.
                 reply = f"Ruk, '{fix['job_name']}' ({fix['job_ref']}) ka koi safe auto-fix nahi hai ({fix['root_cause']}) -- khud dekhna padega, ya bata kya karna hai."
+                if fix.get("research_note"):
+                    reply += f"\n{fix['research_note']}"
             else:
                 # Real fix and its cleanup bookkeeping are deliberately
                 # separated -- a real bug found live: pop_pending_fix's
@@ -1166,7 +1171,7 @@ def health():
         "sandy_config": "key,value",
         "mastery_events": "run_id,agent,round,event_type,provider,summary,detail,parent_event_id",
         "native_mastery_jobs": "id,session_id,skill,mode,weights,caps,usage,state,plan,result,round,created_at,updated_at",
-        "healing_ledger": "job_ref,job_name,engine,root_cause,proposed_updates,is_resolved,announced_in_chat,created_at,resolved_at",
+        "healing_ledger": "job_ref,job_name,engine,root_cause,proposed_updates,is_resolved,announced_in_chat,created_at,resolved_at,research_note",
     }
 
     try:
@@ -1258,10 +1263,22 @@ async def mastery_graph_explain(run_id: str, req: Request):
     """Graph-chat integration -- Ruk asks about a node/cluster/round,
     Sandy answers grounded ONLY in that run's real logged events, never
     freeform narration. Mirrors the same real-data-in-prompt discipline
-    used everywhere else (logs_request, job_status_request, etc.)."""
+    used everywhere else (logs_request, job_status_request, etc.).
+
+    scode: real event-loop-blocking bug fixed here -- this was the ONE
+    async def route in the whole file that called a sync function
+    (call_llm_with_fallback, and events.get_events's sync Supabase call)
+    directly, unwrapped. Sandy runs single-process uvicorn (confirmed:
+    no --workers flag in entrypoint.sh) -- an unwrapped sync call inside
+    async def freezes the ENTIRE event loop, including every other
+    in-flight /chat request, for the full duration of that LLM call.
+    Only `body = await req.json()` needs this route to be async at all;
+    everything else is wrapped in run_in_threadpool so it runs off the
+    event loop, same as every other real route in this file gets for
+    free by being plain `def`."""
     body = await req.json()
     question = body.get("question", "")
-    run_events = events.get_events(run_id)
+    run_events = await run_in_threadpool(events.get_events, run_id)
     if not run_events:
         return {"answer": "Ruk, is run_id ke liye koi real event mila hi nahi -- shayad abhi tak kuch hua nahi hai ya run_id galat hai."}
     event_lines = "\n".join(
@@ -1269,7 +1286,8 @@ async def mastery_graph_explain(run_id: str, req: Request):
         for e in run_events
     )
     try:
-        answer = call_llm_with_fallback(
+        answer = await run_in_threadpool(
+            call_llm_with_fallback,
             "gemini",
             [
                 {"role": "system", "content": SANDY_SYSTEM_PROMPT},

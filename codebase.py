@@ -41,15 +41,30 @@ def read_file(rel_path: str) -> str | None:
 
 
 def analyze(instruction: str) -> str:
-    """Reads every file in the repo for real and asks an LLM to answer
-    Ruk's specific request against the actual current code -- not a
-    guess, not a summary of what a codebase like this might contain."""
+    """Reads the repo and asks an LLM to answer Ruk's specific request
+    against the actual current code -- not a guess, not a summary of
+    what a codebase like this might contain.
+
+    scode: real credit-burn bug this fixes -- this used to send EVERY
+    file in the repo (main.py alone is 1,300+ lines; the whole repo is
+    several hundred KB) into ONE gemini call for every single codebase
+    question, even a narrow one like "is there a bug in search.py."
+    Gemini is Sandy's smallest free-tier quota, shared with chat/Mem0/
+    healing -- one broad-cost call for a narrow question was a real,
+    avoidable waste. If the instruction names real file(s) from the repo
+    (checked against the actual file list, not guessed), only those get
+    sent. A genuinely broad ask ("review everything", "scan your whole
+    code") that names no specific file still gets the full repo, exactly
+    as before -- that's a real use case, not the bug."""
     files = list_files()
-    parts = [f"=== {p} ===\n{read_file(p)}" for p in files if read_file(p) is not None]
+    named = [f for f in files if os.path.basename(f) in instruction or f in instruction]
+    scoped = named or files
+    parts = [f"=== {p} ===\n{read_file(p)}" for p in scoped if read_file(p) is not None]
     combined = "\n\n".join(parts)
 
+    scope_label = f"the specific file(s) Ruk named" if named else "Sandy's entire current codebase"
     prompt = (
-        f"Here is Sandy's entire current codebase ({len(files)} files):\n\n"
+        f"Here is {scope_label} ({len(scoped)} of {len(files)} files):\n\n"
         f"{combined}\n\n"
         f"Ruk's request: {instruction}\n\n"
         "Answer specifically and concretely, referencing actual file names "
@@ -78,3 +93,11 @@ if __name__ == "__main__":
     content = read_file("main.py")
     assert content and "FastAPI" in content, "read_file() didn't return real main.py content"
     print(f"codebase.py: found {len(files)} files, read_file() OK ->", files[:5])
+
+    # scode self-check: naming a real file scopes the request down to it;
+    # naming nothing keeps the old full-repo behavior.
+    named = [f for f in files if os.path.basename(f) in "is there a bug in search.py"]
+    assert named == ["search.py"], f"expected only search.py to match, got: {named}"
+    named_none = [f for f in files if os.path.basename(f) in "review everything please"]
+    assert named_none == [], f"expected no file to match a broad request, got: {named_none}"
+    print("codebase.py: analyze() scoping logic OK")

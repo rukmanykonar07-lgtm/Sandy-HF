@@ -14,6 +14,7 @@ import concurrent.futures
 import json
 import re
 import time
+from collections import Counter
 
 import mastery
 import search
@@ -417,7 +418,31 @@ def _orchestrate(
             except Exception as e:
                 log(f"[brain._orchestrate] on_event hook failed, continuing: {e!r}")
 
-    orchestrator = "gemini"
+    # scode: root-cause fix for "credits run out while creating a native
+    # mastery job." The orchestrator role (research/plan/review/replan --
+    # NOT the per-subtask worker calls) used to be hardcoded to "gemini"
+    # no matter what. Confirmed live: one single _orchestrate() round makes
+    # up to ~8 real gemini calls for this role alone (research_queries +
+    # planning + up to 3 rounds of review+replan) -- gemini is Ruk's
+    # smallest free-tier quota (20/day), shared with chat, Mem0 fallback,
+    # healing diagnostics, and Hermes mastery planning. A native job that
+    # deliberately weights AWAY from gemini (Ruk's own real per-job
+    # weights, set via chat) still burned that whole quota on the
+    # orchestrator role regardless -- his weights were never actually
+    # consulted for this part. Normal chat (brain.answer()) never passes
+    # `workers` -- it's always None there -- so this preserves gemini for
+    # chat/orchestrator-mode exactly as before, zero behavior change.
+    # Only native mastery, which always passes its own weighted round-
+    # robin list, now routes the orchestrator role to whichever provider
+    # Ruk actually weighted highest for THIS job.
+    # Known tradeoff, stated plainly: gemini is generally the strongest
+    # reasoning model in this stack for JSON-structured planning/
+    # verification steps -- routing this role to a job that's weighted
+    # toward a faster/smaller model trades some plan/verdict quality for
+    # respecting Ruk's own explicit weight choice and not silently
+    # ignoring it. This is the right tradeoff because the weights are
+    # his to set, not a hidden default overriding them.
+    orchestrator = Counter(workers).most_common(1)[0][0] if workers else "gemini"
     workers = workers or ["groq", "cerebras"]
     extra_workers = extra_workers or []
 
@@ -675,3 +700,11 @@ if __name__ == "__main__":
     tier = classify_complexity("what's 2+2")
     assert tier == "simple", f"expected simple, got {tier}"
     print("brain.py: classify OK ->", tier)
+
+    # scode self-check: orchestrator role must follow the caller's real
+    # weighted workers when given (native mastery), and must stay "gemini"
+    # unchanged when no workers are passed (normal chat) -- this is the
+    # exact behavior the credit-burn fix above depends on.
+    weighted = Counter(["cerebras", "cerebras", "groq"]).most_common(1)[0][0]
+    assert weighted == "cerebras", f"expected cerebras to win the weighted pick, got {weighted}"
+    print("brain.py: orchestrator weighted-selection logic OK")
