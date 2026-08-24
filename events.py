@@ -27,22 +27,18 @@ frontend needs (build a force-graph client-side from these rows);
 add a real graph store only if this genuinely stops being enough.
 """
 import difflib
-import os
 import uuid
 from typing import Any
 
-from supabase import create_client, Client
+from supabase import Client
 
-_client: Client | None = None
+import config
 
 
 def _db() -> Client:
-    global _client
-    if _client is None:
-        url = os.environ["SUPABASE_URL"]
-        key = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ["SUPABASE_KEY"]
-        _client = create_client(url, key)
-    return _client
+    """Routes through config.get_client() -- the one real Supabase
+    client for the process -- instead of keeping its own copy."""
+    return config.get_client()
 
 
 def new_run_id() -> str:

@@ -134,9 +134,37 @@ def remember(message: str, role: str = "user") -> None:
 
 
 def recall(query: str, limit: int = 5) -> list[str]:
-    """Pull the memories most relevant to the current message."""
-    results = _m().search(query, filters={"user_id": RUK}, top_k=limit)
-    return [r["memory"] for r in results["results"]]
+    """Pull the memories most relevant to the current message.
+
+    scode: real correction made here vs. an earlier draft of this fix --
+    that draft added the same _check_and_bump_cap() gate remember() uses,
+    on the premise that recall() also costs a real Gemini generative
+    call. Verified directly against the installed mem0ai==2.0.11 source
+    (mem0/memory/main.py's search() / _search_vector_store()): with
+    rerank=False (what Sandy actually calls), search() NEVER calls
+    self.llm -- only self.embedding_model.embed(), a separate, much
+    larger quota from the 20/day generate_content limit remember()'s
+    fact-extraction actually consumes. Gating recall() on the same
+    generative call-count cap would have made a cheap embedding-only
+    call incorrectly compete for and drain that budget, causing
+    unnecessary fallback to cerebras even with plenty of real Gemini
+    quota left. The real, still-worth-keeping part of that fix was pure
+    error-handling: recall() had NO try/except before, so a real network
+    hiccup on the embedding call could take down an entire chat turn.
+    That part is kept below -- just without the cap check that doesn't
+    apply to what this function actually costs."""
+    try:
+        results = _m().search(query, filters={"user_id": RUK}, top_k=limit)
+        return [r["memory"] for r in results["results"]]
+    except Exception as e:
+        log(f"[memory.recall] {_MEM_PROVIDER} search failed ({e!r}), trying fallback")
+
+    try:
+        results = _m_fallback().search(query, filters={"user_id": RUK}, top_k=limit)
+        return [r["memory"] for r in results["results"]]
+    except Exception as e:
+        log(f"[memory.recall] fallback {_MEM_FALLBACK_PROVIDER} also failed, returning no memories this turn: {e!r}")
+    return []
 
 
 def get_all_facts(limit: int = 50) -> list[str]:

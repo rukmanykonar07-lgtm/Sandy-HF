@@ -6,11 +6,10 @@ purely so Ruk's Home can show the real word-for-word conversation on
 page refresh. Called automatically alongside memory.remember(), same as
 memory itself: no one ever has to ask Sandy to log anything.
 """
-import os
 import re
 from datetime import date, datetime, timedelta, timezone
 
-from supabase import create_client
+import config
 
 _N_DAYS_AGO_RE = re.compile(r"(\d+)\s*din\s*pehle|(\d+)\s*days?\s*ago", re.IGNORECASE)
 _LAST_WEEK_RE = re.compile(r"\blast week\b|\bpichhle hafte\b|\bpichle hafte\b", re.IGNORECASE)
@@ -54,16 +53,14 @@ def extract_date_range(message: str) -> tuple[str, str] | None:
 
     return None
 
-_client = None
-
-
 def _c():
-    global _client
-    if _client is None:
-        _client = create_client(
-            os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"]
-        )
-    return _client
+    """Was its own separate client (and, unlike config.py's, had no
+    SUPABASE_KEY fallback if SUPABASE_SERVICE_KEY wasn't set -- one of
+    the concrete divergences duplicated clients drift into). Now routes
+    through config.get_client(), the one real client for the process --
+    this also means the fake_db test fixture now actually covers
+    chatlog.py, which it silently didn't before."""
+    return config.get_client()
 
 
 def log(message: str, role: str) -> None:

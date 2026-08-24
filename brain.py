@@ -14,7 +14,6 @@ import concurrent.futures
 import json
 import re
 import time
-from collections import Counter
 
 import mastery
 import search
@@ -94,7 +93,7 @@ def classify_complexity(task: str) -> str:
         "simple, medium, complex, or very_complex.\n"
         f"Task: {task}\nAnswer with one word only."
     )
-    result = call_llm_with_fallback("groq", [{"role": "user", "content": prompt}]).strip().lower()
+    result = call_llm_with_fallback("groq", [{"role": "user", "content": prompt}], caller="brain.classify_complexity").strip().lower()
     return result if result in {"simple", "medium", "complex", "very_complex"} else "medium"
 
 
@@ -188,7 +187,7 @@ def _self_check_output(worker: str, sub_task: str, output: str) -> str:
                     f"{block}\n\nFix it. Return ONLY the corrected code, no explanation, no fences."
                 )
                 try:
-                    fixed = call_llm_with_fallback(worker, [{"role": "user", "content": fix_prompt}])
+                    fixed = call_llm_with_fallback(worker, [{"role": "user", "content": fix_prompt}], caller="brain.self_check.fix_syntax")
                     output = output.replace(block, strip_fence(fixed))
                 except Exception as e2:
                     log(f"[brain._self_check_output] fix attempt failed, returning as-is: {e2!r}")
@@ -202,7 +201,7 @@ def _self_check_output(worker: str, sub_task: str, output: str) -> str:
             "unchanged. Output ONLY the (possibly corrected) content, no "
             "commentary, no preamble."
         )
-        return call_llm_with_fallback(worker, [{"role": "user", "content": review_prompt}])
+        return call_llm_with_fallback(worker, [{"role": "user", "content": review_prompt}], caller="brain.self_check.review")
     except Exception as e:
         log(f"[brain._self_check_output] review failed, returning original: {e!r}")
         return output
@@ -247,7 +246,7 @@ def _judge(task: str, answers: dict[str, str], confidences: dict[str, tuple[int 
         "Write the single best final answer, merging the strongest parts. "
         "Output only the final answer, no commentary."
     )
-    return call_llm_with_fallback("gemini", [_IDENTITY_MSG, {"role": "user", "content": prompt}])
+    return call_llm_with_fallback("gemini", [_IDENTITY_MSG, {"role": "user", "content": prompt}], caller="brain.judge")
 
 
 def _run_tier(task: str, providers: list[str], context: str, history: list[dict] | None = None) -> str:
@@ -257,7 +256,7 @@ def _run_tier(task: str, providers: list[str], context: str, history: list[dict]
     confidences = {}
     last_error = None
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(providers)) as pool:
-        future_to_provider = {pool.submit(call_llm, p, messages): p for p in providers}
+        future_to_provider = {pool.submit(call_llm, p, messages, caller="brain.run_tier"): p for p in providers}
         for future in concurrent.futures.as_completed(future_to_provider):
             p = future_to_provider[future]
             try:
@@ -277,7 +276,7 @@ def _run_tier(task: str, providers: list[str], context: str, history: list[dict]
     if not answers:
         for p in [m for m in MODELS if m not in providers]:  # last resort: try what this tier never had
             try:
-                raw = call_llm(p, messages)
+                raw = call_llm(p, messages, caller="brain.run_tier.last_resort")
                 clean, _, _ = _extract_confidence(raw)
                 return clean
             except Exception as e:
@@ -321,7 +320,7 @@ def _research_queries(topic: str, angle: str = "") -> list[str]:
         'Reply JSON only: {"queries": ["...", "..."]}'
     )
     try:
-        raw = call_llm_with_fallback("gemini", [{"role": "user", "content": prompt}])
+        raw = call_llm_with_fallback("gemini", [{"role": "user", "content": prompt}], caller="brain.research_queries")
         queries = json.loads(strip_json_fence(raw)).get("queries")
         if isinstance(queries, list) and queries:
             return [str(q) for q in queries][:MAX_RESEARCH_QUERIES]
@@ -365,7 +364,7 @@ def _research(topic: str, angle: str = "", log_list: list[dict] | None = None) -
 def _orchestrate(
     task: str, context: str, history: list[dict] | None = None, on_event=None,
     workers: list[str] | None = None, extra_workers: list[str] | None = None,
-    provider_guard=None, should_continue=None,
+    provider_guard=None, should_continue=None, orchestrator: str | None = None,
 ) -> str:
     """v3 (built after Ruk's refinement): Gemini researches multiple
     angles FIRST (existing tools, approaches, repos), plans 2-4
@@ -410,7 +409,17 @@ def _orchestrate(
     replan round (the only real checkpoint this loop has -- there's no
     finer mid-round pause). Returns False -> stop and return the best
     result so far instead of continuing to replan. Default None = never
-    stops early, unchanged for every existing caller."""
+    stops early, unchanged for every existing caller.
+
+    orchestrator -- which provider runs the research/plan/review/replan
+    role. Was hardcoded to "gemini" regardless of what was passed in
+    here -- meaning a native mastery job configured to barely use
+    Gemini still burned up to ~8 Gemini calls per round on
+    orchestration alone (research + planning, then review + replan per
+    round, up to MAX_ORCHESTRATOR_ROUNDS). Default None -> "gemini",
+    so normal chat use (brain.answer, which never passes this) is
+    completely unchanged. native_mastery.py now passes the job's own
+    top-weighted real provider explicitly."""
     def _emit(event_type, summary, round=0, provider=None, detail=None):
         if on_event:
             try:
@@ -418,31 +427,7 @@ def _orchestrate(
             except Exception as e:
                 log(f"[brain._orchestrate] on_event hook failed, continuing: {e!r}")
 
-    # scode: root-cause fix for "credits run out while creating a native
-    # mastery job." The orchestrator role (research/plan/review/replan --
-    # NOT the per-subtask worker calls) used to be hardcoded to "gemini"
-    # no matter what. Confirmed live: one single _orchestrate() round makes
-    # up to ~8 real gemini calls for this role alone (research_queries +
-    # planning + up to 3 rounds of review+replan) -- gemini is Ruk's
-    # smallest free-tier quota (20/day), shared with chat, Mem0 fallback,
-    # healing diagnostics, and Hermes mastery planning. A native job that
-    # deliberately weights AWAY from gemini (Ruk's own real per-job
-    # weights, set via chat) still burned that whole quota on the
-    # orchestrator role regardless -- his weights were never actually
-    # consulted for this part. Normal chat (brain.answer()) never passes
-    # `workers` -- it's always None there -- so this preserves gemini for
-    # chat/orchestrator-mode exactly as before, zero behavior change.
-    # Only native mastery, which always passes its own weighted round-
-    # robin list, now routes the orchestrator role to whichever provider
-    # Ruk actually weighted highest for THIS job.
-    # Known tradeoff, stated plainly: gemini is generally the strongest
-    # reasoning model in this stack for JSON-structured planning/
-    # verification steps -- routing this role to a job that's weighted
-    # toward a faster/smaller model trades some plan/verdict quality for
-    # respecting Ruk's own explicit weight choice and not silently
-    # ignoring it. This is the right tradeoff because the weights are
-    # his to set, not a hidden default overriding them.
-    orchestrator = Counter(workers).most_common(1)[0][0] if workers else "gemini"
+    orchestrator = orchestrator or "gemini"
     workers = workers or ["groq", "cerebras"]
     extra_workers = extra_workers or []
 
@@ -458,7 +443,7 @@ def _orchestrate(
                 raise
             except Exception as e:
                 log(f"[brain._orchestrate] provider_guard errored, treating as OK: {e!r}")
-        return call_llm(worker, msgs)
+        return call_llm(worker, msgs, caller="brain.orchestrate.worker")
     research_log: list[dict] = []  # every search this run makes: query, provider, source, ok/fail --
                                     # lets the review step check tools are actually working and
                                     # workers aren't quietly duplicating each other's searches
@@ -477,7 +462,7 @@ def _orchestrate(
         'Return JSON only: {"subtasks": [{"task": "...", "notes": "..."}]}'
     )
     try:
-        plan_raw = call_llm_with_fallback(orchestrator, [{"role": "user", "content": plan_prompt}])
+        plan_raw = call_llm_with_fallback(orchestrator, [{"role": "user", "content": plan_prompt}], caller="brain.orchestrate.plan")
         subtasks = json.loads(strip_json_fence(plan_raw))["subtasks"]
         if not isinstance(subtasks, list) or not subtasks:
             raise ValueError
@@ -505,7 +490,7 @@ def _orchestrate(
                 "(deep/structured). "
                 'Reply JSON only: {"query": "...", "provider": "tavily"} or {"query": null}'
             )
-            need_raw = call_llm_with_fallback(worker, [{"role": "user", "content": need_prompt}])
+            need_raw = call_llm_with_fallback(worker, [{"role": "user", "content": need_prompt}], caller="brain.orchestrate.worker_own_research")
             need = json.loads(strip_json_fence(need_raw))
             if need.get("query"):
                 provider = need.get("provider") if need.get("provider") in ("tavily", "exa", "linkup") else None
@@ -537,7 +522,7 @@ def _orchestrate(
         except Exception as e:
             log(f"[brain._orchestrate] worker '{worker}' failed, trying orchestrator fallback: {e!r}")
             try:
-                raw = call_llm_with_fallback(orchestrator, msgs)
+                raw = call_llm_with_fallback(orchestrator, msgs, caller="brain.orchestrate.worker_fallback")
             except Exception as e2:
                 log(f"[brain._orchestrate] worker '{worker}' fallback also failed: {e2!r}")
                 return f"(this sub-task could not be completed: {sub_task} -- all providers failed)", (None, "")
@@ -558,7 +543,7 @@ def _orchestrate(
         except Exception as e:
             log(f"[brain._orchestrate] gap worker '{worker}' failed, trying orchestrator fallback: {e!r}")
             try:
-                raw = call_llm_with_fallback(orchestrator, msgs)
+                raw = call_llm_with_fallback(orchestrator, msgs, caller="brain.orchestrate.gap_fallback")
             except Exception as e2:
                 log(f"[brain._orchestrate] gap worker '{worker}' fallback also failed: {e2!r}")
                 return f"(gap sub-task could not be completed: {sub_text})"
@@ -602,7 +587,8 @@ def _orchestrate(
         )
         try:
             verdict_raw = call_llm_with_fallback(
-                orchestrator, [_IDENTITY_MSG] + _with_history(history) + [{"role": "user", "content": review_prompt}]
+                orchestrator, [_IDENTITY_MSG] + _with_history(history) + [{"role": "user", "content": review_prompt}],
+                caller="brain.orchestrate.review",
             )
         except Exception as e:
             log(f"[brain._orchestrate] review failed, returning raw results: {e!r}")
@@ -644,7 +630,7 @@ def _orchestrate(
             'holistically using everything above. JSON only: {"subtasks": ["...", "..."]}'
         )
         try:
-            replan_raw = call_llm_with_fallback(orchestrator, [{"role": "user", "content": replan_prompt}])
+            replan_raw = call_llm_with_fallback(orchestrator, [{"role": "user", "content": replan_prompt}], caller="brain.orchestrate.replan")
             next_subtasks = json.loads(strip_json_fence(replan_raw))["subtasks"]
             if not isinstance(next_subtasks, list) or not next_subtasks:
                 raise ValueError
@@ -700,11 +686,3 @@ if __name__ == "__main__":
     tier = classify_complexity("what's 2+2")
     assert tier == "simple", f"expected simple, got {tier}"
     print("brain.py: classify OK ->", tier)
-
-    # scode self-check: orchestrator role must follow the caller's real
-    # weighted workers when given (native mastery), and must stay "gemini"
-    # unchanged when no workers are passed (normal chat) -- this is the
-    # exact behavior the credit-burn fix above depends on.
-    weighted = Counter(["cerebras", "cerebras", "groq"]).most_common(1)[0][0]
-    assert weighted == "cerebras", f"expected cerebras to win the weighted pick, got {weighted}"
-    print("brain.py: orchestrator weighted-selection logic OK")

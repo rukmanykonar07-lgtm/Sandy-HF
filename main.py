@@ -83,6 +83,71 @@ def _is_trivial(text: str) -> bool:
     return all(w in _TRIVIAL_WORDS for w in words)
 
 
+# scode: real, measured cost this fixes -- classify_message()'s system
+# prompt alone is ~2,300 tokens, paid as its OWN Groq round trip before
+# Ruk's actual answer even starts generating, on EVERY message that
+# isn't a literal _is_trivial greeting. A genuinely ordinary question
+# ("explain recursion", "what's 2+2", "how's your day") has zero real
+# chance of matching any of the 15 tracked axes (mastery/selfmod/
+# config/logs/search/jobs/etc) but paid that full cost anyway.
+#
+# Deliberately broad/permissive in the direction that matters: every
+# one of these 15 fields fails SAFE when wrongly left off -- Sandy just
+# answers normally instead of taking a special action, Ruk notices and
+# rephrases. There's no unsafe outcome from an over-inclusive keyword
+# list here, only a missed savings opportunity -- which is the
+# acceptable side to err on. When in doubt, this returns None and the
+# real classifier still runs, unchanged.
+_SPECIAL_SIGNAL_WORDS = {
+    # config/caps
+    "cap", "caps", "limit", "quota", "credit", "credits",
+    # selfmod / code changes / codebase review
+    "edit", "rollback", "revert", "code", ".py", "file", "repo",
+    "review", "scan", "codebase", "refactor", "fix",
+    # mastery (both engines) + hermes job edits
+    "master", "mastery", "skill", "hermes", "native", "job", "jobs",
+    "cron", "orchestrat", "pin", "weight", "weights",
+    # logs / internal diagnosis
+    "log", "logs", "error", "fail", "failed", "failing", "broke",
+    "broken", "crash", "bug", "issue", "problem", "diagnose", "debug",
+    "why is", "whats wrong", "what's wrong",
+    # search
+    "search", "look up", "lookup", "google", "find out", "latest",
+    "current", "news", "research",
+    # job status / push history / capabilities
+    "status", "running", "push", "commit", "deploy", "deployed",
+    "capable", "capability", "capabilities", "what can you", "can you do",
+}
+
+
+def _fast_classification(message: str) -> dict:
+    """Same shape classify_message() returns, every special axis off --
+    used only when _maybe_skip_classifier already confirmed none of
+    them could plausibly apply."""
+    word_count = len(message.split())
+    return {
+        "config_change": None, "selfmod": None, "mastery": None,
+        "mastery_explore": None, "mastery_control": None,
+        "hermes_job_edit": None, "native_job_edit": None, "codebase_analysis": False,
+        "logs_request": False, "search_needed": False,
+        "llm_override": None,
+        "complexity": "simple" if word_count <= 12 else "medium",
+        "job_status_request": False, "push_history_request": False,
+        "capabilities_request": False,
+    }
+
+
+def _maybe_skip_classifier(message: str) -> dict | None:
+    """Returns a cheap default classification when this message has no
+    real chance of needing the full 15-axis classifier, or None to
+    fall through to the real thing (unchanged behavior)."""
+    low = message.lower()
+    provider_words = {p.lower() for p in MODELS} | {"orchestrator"}
+    if any(w in low for w in _SPECIAL_SIGNAL_WORDS) or any(w in low for w in provider_words):
+        return None
+    return _fast_classification(message)
+
+
 _AFFIRMATIVE_TOKENS = {
     "yes", "ya", "yeah", "yep", "sure", "ok", "okay",
     "haan", "han", "ha", "hn", "haanji",
@@ -220,6 +285,7 @@ def classify_message(message: str, pending_skill: str | None = None) -> dict:
         '  "mastery_explore": {"skill": "...", "engine": "hermes"} or null,\n'
         '  "mastery_control": {"action": "pause", "engine": "native", "job_ref": null} or null,\n'
         '  "hermes_job_edit": {"job_ref": "...", "updates": {"provider": "gemini"}} or null,\n'
+        '  "native_job_edit": {"job_ref": "...", "updates": {"weights": {"gemini": 70}, "caps": {}, "mode": null}} or null,\n'
         '  "codebase_analysis": false,\n'
         '  "logs_request": false,\n'
         '  "search_needed": false,\n'
@@ -268,6 +334,15 @@ def classify_message(message: str, pending_skill: str | None = None) -> dict:
         "NEVER add a key he didn't mention (no inventing a 'skills' or 'model' value he never "
         "gave you, even if it seems like it would help) -- an edit with a value Ruk didn't "
         "actually ask for is not a real edit, it's a fabrication with real side effects.\n"
+        "- native_job_edit: set when Ruk wants to CHANGE the provider weights, per-job caps, "
+        "or mode on an EXISTING, already-CONFIRMED native (his-own-orchestration) mastery job "
+        "-- 'change job X's weights to gemini 70 groq 30', 'set cerebras cap to 20 on Y', "
+        "'switch Z to scheduled mode'. NOT proposing a new job, NOT pause/resume/remove "
+        "(mastery_control). job_ref: the job id or name Ruk gave. updates.weights/caps: ONLY "
+        "the exact provider(s)/number(s) Ruk actually said, as a partial dict -- never invent "
+        "or complete a full split he didn't state (e.g. he says 'bump gemini to 70' -> "
+        "{\"weights\": {\"gemini\": 70}}, NOT a full 100%-summing dict you made up to fill the "
+        "rest). updates.mode: only if he explicitly names continuous/scheduled.\n"
         "- codebase_analysis: true for READ-ONLY review/scan/analyze of Sandy's own "
         "source code -- not asking to change/fix/edit anything (that's selfmod's job). This "
         "INCLUDES questions about a specific feature's code/files -- 'what's new in the "
@@ -401,6 +476,23 @@ def classify_message(message: str, pending_skill: str | None = None) -> dict:
     else:
         hermes_job_edit = None
 
+    native_job_edit = data.get("native_job_edit")
+    if isinstance(native_job_edit, dict) and native_job_edit.get("job_ref") and isinstance(native_job_edit.get("updates"), dict):
+        nje_updates = native_job_edit["updates"]
+        # same discipline as hermes_job_edit above: only real, non-empty
+        # fields survive -- an edit with nothing Ruk actually asked for
+        # is not a real edit.
+        clean_updates = {}
+        if isinstance(nje_updates.get("weights"), dict) and nje_updates["weights"]:
+            clean_updates["weights"] = nje_updates["weights"]
+        if isinstance(nje_updates.get("caps"), dict) and nje_updates["caps"]:
+            clean_updates["caps"] = nje_updates["caps"]
+        if isinstance(nje_updates.get("mode"), str) and nje_updates["mode"] in ("continuous", "scheduled"):
+            clean_updates["mode"] = nje_updates["mode"]
+        native_job_edit = {"job_ref": native_job_edit["job_ref"], "updates": clean_updates} if clean_updates else None
+    else:
+        native_job_edit = None
+
     logs_req = bool(data.get("logs_request"))
     # Hard structural guard, not just a prompt instruction -- even if the
     # classifier mis-flags both true on some future phrasing, logs_request
@@ -417,6 +509,7 @@ def classify_message(message: str, pending_skill: str | None = None) -> dict:
         "mastery_explore": mastery_explore,
         "mastery_control": mastery_control,
         "hermes_job_edit": hermes_job_edit,
+        "native_job_edit": native_job_edit,
         "codebase_analysis": bool(data.get("codebase_analysis")),
         "logs_request": logs_req,
         "search_needed": search_needed,
@@ -681,7 +774,16 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
         _remember(background_tasks, reply, role="assistant")
         return ChatResponse(reply=reply)
 
-    cls = classify_message(req.message, pending_skill=mastery.get_pending_explore(req.session_id))
+    pending_skill = mastery.get_pending_explore(req.session_id)
+    # scode: real near-bug caught here -- if Sandy is mid-flow waiting on
+    # "how many days/hours?", Ruk's reply might just be "3 days, 4 hours
+    # a day" with no mastery/skill/job keyword in it at all. The fast
+    # pre-filter would wrongly skip straight past classify_message()'s
+    # own belt-and-suspenders regex fallback that exists specifically for
+    # this reply. Only allow the fast path when nothing is pending.
+    cls = _maybe_skip_classifier(req.message) if not pending_skill else None
+    if cls is None:
+        cls = classify_message(req.message, pending_skill=pending_skill)
     if cls["mastery"]:
         mastery.pop_pending_explore(req.session_id)  # resolved -- clear it so it can't leak into a later unrelated message
 
@@ -790,6 +892,31 @@ def _handle_chat(req: ChatRequest, background_tasks: BackgroundTasks) -> ChatRes
             reply = mastery.edit_mastery_job(hje["job_ref"], hje["updates"])
         except Exception as e:
             log(f"[hermes_job_edit] real failure: {e!r}")
+            reply = f"Ruk, update karte waqt real error aa gaya: {e}"
+        _remember(background_tasks, reply, role="assistant")
+        return ChatResponse(reply=reply)
+
+    nje = cls["native_job_edit"]
+    if nje:
+        # Mirrors hje right above -- same reasoning: a real spend-adjacent
+        # change (weights/caps) confirms first, doesn't apply silently.
+        # Only reachable now that native_mastery.edit_native_job() exists
+        # -- previously identity.py claimed this capability but there was
+        # no function behind it at all for an already-confirmed job.
+        if not req.approved:
+            _remember(background_tasks, req.message, role="user")
+            reply = f"Ruk, confirm karo -- native job '{nje['job_ref']}' ko {nje['updates']} se update kar du?"
+            return ChatResponse(reply=reply, needs_approval=True)
+        _remember(background_tasks, req.message, role="user")
+        try:
+            reply = native_mastery.edit_native_job(
+                nje["job_ref"],
+                weights=nje["updates"].get("weights"),
+                caps=nje["updates"].get("caps"),
+                mode=nje["updates"].get("mode"),
+            )
+        except Exception as e:
+            log(f"[native_job_edit] real failure: {e!r}")
             reply = f"Ruk, update karte waqt real error aa gaya: {e}"
         _remember(background_tasks, reply, role="assistant")
         return ChatResponse(reply=reply)
