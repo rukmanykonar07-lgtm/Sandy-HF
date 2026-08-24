@@ -22,6 +22,19 @@ from identity import SANDY_SYSTEM_PROMPT
 
 _IDENTITY_MSG = {"role": "system", "content": SANDY_SYSTEM_PROMPT}
 
+# scode: the judge/verdict calls below never speak to Ruk -- their output
+# is an internal merge/arbitration of other models' answers. Attaching the
+# full ~2.7k-token identity prompt to them bought zero personality (their
+# output replaces worker prose only after re-framing) at full price every
+# medium+ message. A one-line role instruction is all these calls need.
+_MERGE_MSG = {
+    "role": "system",
+    "content": (
+        "You arbitrate between multiple AI model answers to one task. "
+        "Output only the final merged answer, in a warm, natural, helpful voice."
+    ),
+}
+
 _HISTORY_FRAME = {
     "role": "system",
     "content": (
@@ -68,6 +81,12 @@ TIERS = {
     "complex": ["groq", "gemini", "cerebras"],
 }
 MAX_ORCHESTRATOR_ROUNDS = 3  # ponytail: hard stop so a bad loop can't burn the whole day's cap
+MAX_ORCH_CALLS = 16          # scode: per-request ceiling on TOTAL orchestrator LLM calls
+                             # (plan + workers + reviews + replans + gap rounds). A task that's
+                             # genuinely progressing finishes well under this; hitting it means
+                             # the loop is stuck repeating itself -- degrade to best-so-far
+                             # instead of letting one message eat the day's quota. Tighter,
+                             # request-scoped sibling of MAX_ORCHESTRATOR_ROUNDS.
 MAX_RESEARCH_QUERIES = 5  # cap on Gemini's own multi-angle research pass -- "deep research"
                           # must not mean "silently burn the whole day's quota on one message"
 MAX_WORKER_RESEARCH = 1   # each worker gets at most one extra targeted search of its own,
@@ -168,7 +187,7 @@ def _extract_code_blocks(text: str) -> list[str]:
     return re.findall(r"```(?:python|py)?\n(.*?)```", text, re.DOTALL)
 
 
-def _self_check_output(worker: str, sub_task: str, output: str) -> str:
+def _self_check_output(worker: str, sub_task: str, output: str, count_fn=None) -> str:
     """Best-effort correctness pass before a worker's output is trusted.
     Python code blocks get a real ast.parse() syntax check -- same
     instinct as selfmod.py's pre-push validation, generalized here to
@@ -187,7 +206,10 @@ def _self_check_output(worker: str, sub_task: str, output: str) -> str:
                     f"{block}\n\nFix it. Return ONLY the corrected code, no explanation, no fences."
                 )
                 try:
-                    fixed = call_llm_with_fallback(worker, [{"role": "user", "content": fix_prompt}], caller="brain.self_check.fix_syntax")
+                    if count_fn is not None:
+                        fixed = count_fn(worker, [{"role": "user", "content": fix_prompt}], caller="brain.self_check.fix_syntax")
+                    else:
+                        fixed = call_llm_with_fallback(worker, [{"role": "user", "content": fix_prompt}], caller="brain.self_check.fix_syntax")
                     output = output.replace(block, strip_fence(fixed))
                 except Exception as e2:
                     log(f"[brain._self_check_output] fix attempt failed, returning as-is: {e2!r}")
@@ -201,6 +223,8 @@ def _self_check_output(worker: str, sub_task: str, output: str) -> str:
             "unchanged. Output ONLY the (possibly corrected) content, no "
             "commentary, no preamble."
         )
+        if count_fn is not None:
+            return count_fn(worker, [{"role": "user", "content": review_prompt}], caller="brain.self_check.review")
         return call_llm_with_fallback(worker, [{"role": "user", "content": review_prompt}], caller="brain.self_check.review")
     except Exception as e:
         log(f"[brain._self_check_output] review failed, returning original: {e!r}")
@@ -226,6 +250,40 @@ def _research_log_summary(research_log: list[dict]) -> str:
     return summary
 
 
+_JACCARD_THRESHOLD = 0.75
+_WORD_RE = re.compile(r"[a-z0-9']+")
+
+
+def _answer_tokens(text: str) -> set[str]:
+    """Lowercased word tokens of an answer, with pure filler stripped --
+    'um', 'well', 'hey' etc. openers shouldn't make two semantically
+    identical answers look different (or two boilerplate-only replies look
+    identical). Greeting/small-talk answers are short enough that raw
+    token overlap is noisy without this."""
+    filler = {"um", "uh", "well", "so", "hey", "hi", "hello", "haha", "okay", "ok", "just", "really", "actually"}
+    return {w for w in _WORD_RE.findall(text.lower()) if w not in filler}
+
+
+def _find_agreement(answers: dict[str, str], confidences: dict[str, tuple[int | None, str]] | None) -> str | None:
+    """If >=2 answers substantially agree, return the highest-confidence
+    one of them; else None (-> real disagreement -> judge earns its call)."""
+    names = list(answers)
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            a, b = _answer_tokens(answers[names[i]]), _answer_tokens(answers[names[j]])
+            if not a or not b:
+                continue
+            jac = len(a & b) / len(a | b)
+            if jac > _JACCARD_THRESHOLD:
+                pair = [names[i], names[j]]
+                if confidences:
+                    best = max(pair, key=lambda p: confidences.get(p, (None, ""))[0] if confidences.get(p, (None, ""))[0] is not None else -1)
+                else:
+                    best = pair[0]
+                return answers[best]
+    return None
+
+
 def _judge(task: str, answers: dict[str, str], confidences: dict[str, tuple[int | None, str]] | None = None) -> str:
     """One LLM picks/merges the best answer out of several. If self-rated
     confidence scores came through, the merge is told about them
@@ -246,7 +304,7 @@ def _judge(task: str, answers: dict[str, str], confidences: dict[str, tuple[int 
         "Write the single best final answer, merging the strongest parts. "
         "Output only the final answer, no commentary."
     )
-    return call_llm_with_fallback("gemini", [_IDENTITY_MSG, {"role": "user", "content": prompt}], caller="brain.judge")
+    return call_llm_with_fallback("gemini", [_MERGE_MSG, {"role": "user", "content": prompt}], caller="brain.judge")
 
 
 def _run_tier(task: str, providers: list[str], context: str, history: list[dict] | None = None) -> str:
@@ -285,6 +343,16 @@ def _run_tier(task: str, providers: list[str], context: str, history: list[dict]
         raise CapExceeded(str(last_error) if last_error else "all providers for this tier are capped")
     if len(answers) == 1:
         return next(iter(answers.values()))
+    # scode: if two or more models independently landed on substantially
+    # the same answer, there is no disagreement for a judge to arbitrate
+    # -- paying a full extra LLM call (~5k tok with the old identity, still
+    # ~2.3k without) to merge identical answers bought nothing. Normalized
+    # token-set Jaccard > 0.75 between any pair counts as agreement; the
+    # highest-confidence member of the agreeing pair goes straight out.
+    # Real disagreements (the actual judge use case) fall through untouched.
+    agreed = _find_agreement(answers, confidences)
+    if agreed is not None:
+        return agreed
     try:
         return _judge(task, answers, confidences)
     except Exception as e:
@@ -304,12 +372,15 @@ def _run_tier(task: str, providers: list[str], context: str, history: list[dict]
         return next(iter(answers.values()))
 
 
-def _research_queries(topic: str, angle: str = "") -> list[str]:
+def _research_queries(topic: str, angle: str = "", count_fn=None) -> list[str]:
     """What different angles/approaches/tools/existing solutions should
     be explored for this? Returns up to MAX_RESEARCH_QUERIES short search
     queries. Fails safe to a single direct query if this call itself
     fails or returns something unusable -- research is a quality boost,
-    never something that should block orchestration from proceeding."""
+    never something that should block orchestration from proceeding.
+    count_fn: orchestrator's budget-counting wrapper -- when given, this
+    LLM call counts toward the per-request ceiling (a CapExceeded from it
+    lands in the same fail-safe fallback as any other failure)."""
     prompt = (
         f"For this task: {topic}\n"
         + (f"Specifically for this part: {angle}\n" if angle else "")
@@ -320,7 +391,10 @@ def _research_queries(topic: str, angle: str = "") -> list[str]:
         'Reply JSON only: {"queries": ["...", "..."]}'
     )
     try:
-        raw = call_llm_with_fallback("gemini", [{"role": "user", "content": prompt}], caller="brain.research_queries")
+        if count_fn is not None:
+            raw = count_fn("gemini", [{"role": "user", "content": prompt}], caller="brain.research_queries")
+        else:
+            raw = call_llm_with_fallback("gemini", [{"role": "user", "content": prompt}], caller="brain.research_queries")
         queries = json.loads(strip_json_fence(raw)).get("queries")
         if isinstance(queries, list) and queries:
             return [str(q) for q in queries][:MAX_RESEARCH_QUERIES]
@@ -329,7 +403,7 @@ def _research_queries(topic: str, angle: str = "") -> list[str]:
     return [topic]
 
 
-def _research(topic: str, angle: str = "", log_list: list[dict] | None = None) -> str:
+def _research(topic: str, angle: str = "", log_list: list[dict] | None = None, count_fn=None) -> str:
     """Runs up to MAX_RESEARCH_QUERIES real searches across different
     angles on a topic, returns a combined findings block. Deliberately
     rotates across Tavily/Exa/Linkup instead of defaulting every query
@@ -345,7 +419,7 @@ def _research(topic: str, angle: str = "", log_list: list[dict] | None = None) -
     that research silently happened correctly."""
     providers = ["linkup", "exa", "tavily"]  # deep-understanding query first, then conceptual, then fast
     findings = []
-    for i, q in enumerate(_research_queries(topic, angle)):
+    for i, q in enumerate(_research_queries(topic, angle, count_fn=count_fn)):
         provider = providers[i % len(providers)]
         try:
             results = _cached_search(q, provider)
@@ -431,10 +505,26 @@ def _orchestrate(
     workers = workers or ["groq", "cerebras"]
     extra_workers = extra_workers or []
 
+    # scode: every LLM call this request makes goes through one of these
+    # two wrappers so the ceiling counts real calls, not rounds.
+    budget = {"n": 0}
+
+    def _budget_left() -> bool:
+        return budget["n"] < MAX_ORCH_CALLS
+
+    def _counted(provider: str, msgs: list[dict], caller: str):
+        if not _budget_left():
+            raise CapExceeded(f"orchestrator call budget ({MAX_ORCH_CALLS}) exhausted")
+        budget["n"] += 1
+        return call_llm_with_fallback(provider, msgs, caller=caller)
+
     def _call_guarded(worker: str, msgs: list[dict]):
         """call_llm, but skips straight to the orchestrator fallback if
         provider_guard rejects `worker` -- same shape as a real provider
-        failure, so callers don't need a separate code path for it."""
+        failure, so callers don't need a separate code path for it.
+        Counts toward the per-request call budget too."""
+        if not _budget_left():
+            raise CapExceeded(f"orchestrator call budget ({MAX_ORCH_CALLS}) exhausted")
         if provider_guard is not None:
             try:
                 if not provider_guard(worker):
@@ -443,16 +533,20 @@ def _orchestrate(
                 raise
             except Exception as e:
                 log(f"[brain._orchestrate] provider_guard errored, treating as OK: {e!r}")
+        budget["n"] += 1
         return call_llm(worker, msgs, caller="brain.orchestrate.worker")
     research_log: list[dict] = []  # every search this run makes: query, provider, source, ok/fail --
                                     # lets the review step check tools are actually working and
                                     # workers aren't quietly duplicating each other's searches
 
     skill_context = _find_relevant_skill(task)
-    research = _research(task, log_list=research_log)
+    research = _research(task, log_list=research_log, count_fn=_counted)
     if skill_context:
         research = f"{skill_context}\n\n{research}" if research else skill_context
     _emit("planning", f"Research done ({len(research_log)} queries) -- planning sub-tasks", provider=orchestrator)
+    # scode: keep the round-1 research text around -- later replan rounds
+    # re-read it instead of the orchestrator re-researching the same ground.
+    research_head_start = research
     plan_prompt = (
         (f"{context}\n\n" if context else "")
         + f"Task: {task}\n\nResearch findings:\n{research}\n\n"
@@ -462,7 +556,7 @@ def _orchestrate(
         'Return JSON only: {"subtasks": [{"task": "...", "notes": "..."}]}'
     )
     try:
-        plan_raw = call_llm_with_fallback(orchestrator, [{"role": "user", "content": plan_prompt}], caller="brain.orchestrate.plan")
+        plan_raw = _counted(orchestrator, [{"role": "user", "content": plan_prompt}], caller="brain.orchestrate.plan")
         subtasks = json.loads(strip_json_fence(plan_raw))["subtasks"]
         if not isinstance(subtasks, list) or not subtasks:
             raise ValueError
@@ -490,7 +584,7 @@ def _orchestrate(
                 "(deep/structured). "
                 'Reply JSON only: {"query": "...", "provider": "tavily"} or {"query": null}'
             )
-            need_raw = call_llm_with_fallback(worker, [{"role": "user", "content": need_prompt}], caller="brain.orchestrate.worker_own_research")
+            need_raw = _counted(worker, [{"role": "user", "content": need_prompt}], caller="brain.orchestrate.worker_own_research")
             need = json.loads(strip_json_fence(need_raw))
             if need.get("query"):
                 provider = need.get("provider") if need.get("provider") in ("tavily", "exa", "linkup") else None
@@ -522,12 +616,12 @@ def _orchestrate(
         except Exception as e:
             log(f"[brain._orchestrate] worker '{worker}' failed, trying orchestrator fallback: {e!r}")
             try:
-                raw = call_llm_with_fallback(orchestrator, msgs, caller="brain.orchestrate.worker_fallback")
+                raw = _counted(orchestrator, msgs, caller="brain.orchestrate.worker_fallback")
             except Exception as e2:
                 log(f"[brain._orchestrate] worker '{worker}' fallback also failed: {e2!r}")
                 return f"(this sub-task could not be completed: {sub_task} -- all providers failed)", (None, "")
         clean, conf, reason = _extract_confidence(raw)
-        checked = _self_check_output(worker, sub_task, clean)
+        checked = _self_check_output(worker, sub_task, clean, count_fn=_counted)
         _emit("worker_call", f"{worker} finished sub-task: {sub_task[:80]}", provider=worker, detail=checked[:500])
         return checked, (conf, reason)
 
@@ -543,13 +637,18 @@ def _orchestrate(
         except Exception as e:
             log(f"[brain._orchestrate] gap worker '{worker}' failed, trying orchestrator fallback: {e!r}")
             try:
-                raw = call_llm_with_fallback(orchestrator, msgs, caller="brain.orchestrate.gap_fallback")
+                raw = _counted(orchestrator, msgs, caller="brain.orchestrate.gap_fallback")
             except Exception as e2:
                 log(f"[brain._orchestrate] gap worker '{worker}' fallback also failed: {e2!r}")
                 return f"(gap sub-task could not be completed: {sub_text})"
-        return _self_check_output(worker, sub_text, raw)
+        return _self_check_output(worker, sub_text, raw, count_fn=_counted)
 
     for _round in range(MAX_ORCHESTRATOR_ROUNDS):
+        # scode: graceful degrade -- out of call budget -> hand back the
+        # best result so far instead of pushing further rounds.
+        if not _budget_left():
+            _emit("obstacle", f"LLM call budget ({MAX_ORCH_CALLS}) reached -- keeping best result so far", round=_round, provider=orchestrator)
+            return "\n\n".join(results)
         if should_continue is not None:
             try:
                 if not should_continue():
@@ -586,8 +685,8 @@ def _orchestrate(
             '"research_query": "..." or null, "research_provider": "tavily" or null}'
         )
         try:
-            verdict_raw = call_llm_with_fallback(
-                orchestrator, [_IDENTITY_MSG] + _with_history(history) + [{"role": "user", "content": review_prompt}],
+            verdict_raw = _counted(
+                orchestrator, [_MERGE_MSG] + _with_history(history) + [{"role": "user", "content": review_prompt}],
                 caller="brain.orchestrate.review",
             )
         except Exception as e:
@@ -626,11 +725,14 @@ def _orchestrate(
             + f"\n\nConflicts found: {verdict.get('conflicts', 'none')}"
             + f"\nStill missing: {verdict.get('missing', '')}"
             + (f"\nNew research: {extra_research}" if extra_research else "")
+            + (f"\n\nResearch already gathered in round 1 -- reuse this instead of "
+               f"re-searching the same ground:\n{research_head_start[:1500]}"
+               if research_head_start else "")
             + "\n\nGive the next concrete step(s) to fix/complete this, "
             'holistically using everything above. JSON only: {"subtasks": ["...", "..."]}'
         )
         try:
-            replan_raw = call_llm_with_fallback(orchestrator, [{"role": "user", "content": replan_prompt}], caller="brain.orchestrate.replan")
+            replan_raw = _counted(orchestrator, [{"role": "user", "content": replan_prompt}], caller="brain.orchestrate.replan")
             next_subtasks = json.loads(strip_json_fence(replan_raw))["subtasks"]
             if not isinstance(next_subtasks, list) or not next_subtasks:
                 raise ValueError

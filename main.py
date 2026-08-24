@@ -7,11 +7,13 @@ Flow per message:
   3. if the task is risky (or Ruk opted it into approval) -> ask first
   4. otherwise -> classify/route/orchestrate, remember the exchange, reply
 """
+import copy
 import json
 import os
 import re
 import asyncio
 import secrets
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, BackgroundTasks, Request
@@ -188,10 +190,24 @@ def _remember(background_tasks: BackgroundTasks, text: str, role: str) -> None:
     the exact 'latest messages disappear on reopen' bug he reported.
     Mem0's fact extraction stays backgrounded since that's the genuinely
     slow, LLM-based part actually worth deferring -- no reason to make
-    Ruk wait on it just to see a message he already got."""
+    Ruk wait on it just to see a message he already got.
+
+    scode: each remember() fires mem0's internal fact-extraction LLM call,
+    so rapid-fire short exchanges were paying that cost per turn. Two
+    extra gates on top of _is_trivial: replies under 40 chars ("done",
+    "ok fixed it") rarely carry facts worth extracting; and if another
+    remember fired <20s ago, drop this one rather than queue -- back-to-back
+    bursts are exactly the noise the extractor adds least value to. The
+    chat_log line above is untouched either way, so nothing disappears."""
     chatlog.log(text, role=role)
-    if not _is_trivial(text):
-        background_tasks.add_task(memory.remember, text, role=role)
+    global _last_remember_at
+    now = time.monotonic()
+    if _is_trivial(text) or len(text) < 40 or (now - _last_remember_at) < 20:
+        return
+    _last_remember_at = now
+    background_tasks.add_task(memory.remember, text, role=role)
+
+_last_remember_at = 0.0
 
 def _recall_context(query: str, skill: str | None = None) -> str:
     """Same recalled-memory framing used on the generic chat path, reused
@@ -295,6 +311,14 @@ def _wants_all_providers(message: str) -> bool:
     )
 
 
+_CLASSIFY_CACHE_TTL = 300      # 5 min -- long enough for a double-send/retry,
+                               # short enough to never serve a stale classification
+                               # across a config change or pending_skill shift.
+_CLASSIFY_CACHE_MAX = 128      # plain in-memory dict, same shape as brain's
+                               # _research_cache -- doesn't need to survive restarts.
+_classify_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+
+
 def classify_message(message: str, pending_skill: str | None = None) -> dict:
     """ONE Groq call that replaces what used to be 7 separate classifier
     calls (config-change, selfmod-extract, mastery-extract, codebase-
@@ -312,7 +336,17 @@ def classify_message(message: str, pending_skill: str | None = None) -> dict:
     trust boundary, one round trip instead of seven. All the original
     fail-safe guards (never invent a filename, validate mastery field
     types, reject hallucinated provider names) are preserved below,
-    checked against this single response instead of seven."""
+    checked against this single response instead of seven.
+
+    scode: exact-repeat messages within TTL get the cached result back --
+    Ruk double-sending / retrying a message should not pay the full
+    classify cost twice. Only successful LLM classifications are cached;
+    failures and unparseable responses fall through uncached so they get
+    retried fresh next time."""
+    key = (message.lower().strip(), pending_skill or "")
+    cached = _classify_cache.get(key)
+    if cached and time.time() - cached[0] < _CLASSIFY_CACHE_TTL:
+        return copy.deepcopy(cached[1])
     providers = list(MODELS)
     prompt = (
         "Classify this one message from Ruk to Sandy across ALL of these axes at once. "
@@ -436,6 +470,11 @@ def classify_message(message: str, pending_skill: str | None = None) -> dict:
         data = {}
     if not isinstance(data, dict):
         data = {}
+    # scode: empty dict == LLM failure / unparseable response -- never
+    # cached, so a transient classifier outage gets retried fresh on the
+    # next identical send instead of serving default-shaped results from
+    # cache for TTL minutes.
+    parsed_ok = bool(data)
 
     cfg = data.get("config_change")
     if not isinstance(cfg, dict) or not cfg.get("is") or "key" not in cfg or "value" not in cfg:
@@ -542,7 +581,7 @@ def classify_message(message: str, pending_skill: str | None = None) -> dict:
     # "unrestricted API keys" instead of reading her own real logs.
     search_needed = bool(data.get("search_needed")) and not logs_req
 
-    return {
+    result = {
         "config_change": cfg,
         "selfmod": selfmod_req,
         "mastery": mastery_req,
@@ -559,6 +598,16 @@ def classify_message(message: str, pending_skill: str | None = None) -> dict:
         "push_history_request": bool(data.get("push_history_request")),
         "capabilities_request": bool(data.get("capabilities_request")),
     }
+    # scode: cache the *normalized* result, not raw parsed JSON -- hits must
+    # be byte-for-byte what a fresh call would have returned (defaults and
+    # bool coercion included). Stored only when the LLM actually parsed, and
+    # deep-copied on both write and read so a caller mutating its dict can
+    # never poison the cached copy.
+    if parsed_ok:
+        if len(_classify_cache) >= _CLASSIFY_CACHE_MAX:
+            del _classify_cache[min(_classify_cache, key=lambda k: _classify_cache[k][0])]
+        _classify_cache[key] = (time.time(), copy.deepcopy(result))
+    return result
 
 
 @app.post("/chat", response_model=ChatResponse)
