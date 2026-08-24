@@ -37,6 +37,7 @@ import brain
 import config
 import events
 import healing
+import observability
 from identity import SANDY_SYSTEM_PROMPT
 from llm import call_llm_with_fallback, log, MODELS
 
@@ -101,6 +102,12 @@ _ALLOWED_TRANSITIONS = {
     "resume": {"paused"},
     "continue_now": {"scheduled_waiting"},
     "mark_done": {"running", "paused", "scheduled_waiting"},
+    # NEW: editing an already-confirmed job's weights/caps/mode. Valid
+    # from any non-terminal, already-confirmed state -- NOT "proposed"
+    # (propose()+feedback already handles pre-confirm edits, a
+    # different code path with a different plan-regeneration prompt),
+    # and not "done"/"removed" (nothing left to edit).
+    "edit": {"running", "paused", "scheduled_waiting"},
 }
 
 
@@ -264,21 +271,92 @@ def parse_directives(message: str) -> tuple[str | None, dict[str, int], dict[str
     return mode, weights, caps
 
 
+def _quota_dampen(weights: dict[str, int]) -> dict[str, float]:
+    """Scale each provider's weight by how close it is to its own daily
+    cap -- exhausted providers drop to 0 (excluded), providers in the
+    warn band (80%+, see observability.cap_status) get dampened to 65%
+    of their stated weight, healthy/uncapped providers are untouched.
+
+    Ported from OmniRoute's routing scorer (src/lib/routing/
+    adaptiveRouting.ts, quotaFactor()) -- same idea (exhausted=0,
+    approaching_limit=0.65, healthy=1), applied here to Ruk's static
+    percentage weights instead of a live multi-factor score, since
+    Sandy doesn't track per-provider latency/health/circuit state the
+    way OmniRoute's gateway does. This is what makes a job actually
+    shift load AWAY from a provider that's about to hit its cap,
+    instead of blindly following the static split until a hard
+    failure forces a fallback. Fails safe: any error reading cap
+    status leaves that provider's weight untouched (same fail-open
+    principle as llm.py's cap check) -- a broken dampening check
+    should never be able to stall job scheduling entirely."""
+    dampened = {}
+    for provider, pct in weights.items():
+        try:
+            state = observability.cap_status(provider)["state"]
+        except Exception as e:
+            log(f"[_quota_dampen] cap_status failed for {provider}, leaving weight as-is: {e!r}")
+            dampened[provider] = pct
+            continue
+        if state == "exhausted":
+            dampened[provider] = 0
+        elif state == "warn":
+            dampened[provider] = pct * 0.65
+        else:
+            dampened[provider] = pct
+    return dampened
+
+
 def _weighted_worker_list(weights: dict[str, int], slots: int = 6) -> list[str]:
     """Turns {'gemini': 50, 'groq': 30, 'cerebras': 20} into a real
     round-robin list _orchestrate can use directly -- proportional
     representation. Any real provider name works here, not just the
     original three -- Ruk adding a new weighted model just means a new
-    key in this dict, nothing else has to change."""
+    key in this dict, nothing else has to change.
+
+    Quota-aware (added): weights are dampened by _quota_dampen() first,
+    so a provider close to (or past) its own daily cap gets less (or
+    no) work this round, instead of the job blindly hammering it at
+    the full static split until every call from it starts failing."""
     weights = {p: pct for p, pct in weights.items() if p in MODELS}
     if not weights:
         return ["groq", "cerebras"]  # same default _orchestrate already uses
-    total = sum(weights.values()) or 1
+    weights = _quota_dampen(weights)
+    total = sum(weights.values())
+    if total <= 0:
+        # every weighted provider is exhausted right now -- fall back to
+        # the same safety net _orchestrate already uses rather than
+        # returning an empty worker list.
+        return ["groq", "cerebras"]
     out = []
     for provider, pct in weights.items():
+        if pct <= 0:
+            continue
         out += [provider] * max(1, round(slots * pct / total))
     random.shuffle(out)
     return out
+
+
+def _top_weighted_provider(weights: dict[str, int], default: str = "gemini") -> str:
+    """The job's own single highest-weighted real provider -- used to
+    pick WHO runs the orchestrator role (research/plan/review/replan).
+
+    This used to just be a hardcoded "gemini" inside brain._orchestrate,
+    completely ignoring the job's weights -- meaning a job configured to
+    barely use Gemini could still burn ~8 Gemini calls per round on
+    orchestration alone, on top of whatever it burned as a worker. That
+    was Ruk's #1 flagged credit-burn cause. Deliberately NOT derived
+    from _weighted_worker_list() above -- that list is randomly
+    shuffled for round-robin worker assignment, so its [0] element is
+    not "the top-weighted provider", it's an arbitrary pick.
+    default="gemini" preserves prior behavior when no weights are set
+    at all (empty dict) -- not a random guess, Gemini's real strength
+    at structured JSON planning/review is the original, still-valid
+    reason it was the default worth keeping as a fallback.
+    """
+    real = {p: pct for p, pct in (weights or {}).items() if p in MODELS and pct}
+    if not real:
+        return default
+    return max(real, key=real.get)
 
 
 # --- explain (no job yet) ----------------------------------------------
@@ -358,7 +436,7 @@ def propose(
     )
     if context:
         prompt = f"{context}\n\n{prompt}"
-    plan = call_llm_with_fallback("gemini", [_IDENTITY_MSG, {"role": "user", "content": prompt}])
+    plan = call_llm_with_fallback("gemini", [_IDENTITY_MSG, {"role": "user", "content": prompt}], caller="native_mastery.propose")
 
     job_id = (prior or {}).get("id") or events.new_run_id()
     job = {
@@ -367,6 +445,17 @@ def propose(
         "usage": (prior or {}).get("usage", {}),
         "state": "proposed", "plan": plan, "result": (prior or {}).get("result"),
         "round": (prior or {}).get("round", 0),
+        # explicit, not relying on the table's DEFAULT now() -- this is
+        # the column get_pending_native_plan() orders by (desc) to find
+        # "the most recent proposed job for this session". Leaving it
+        # unset here means the LOCAL job dict has no created_at until
+        # the next real fetch from Supabase -- and if a caller ever
+        # compares/orders freshly-proposed jobs before that round-trip
+        # (exactly what the test suite caught), it silently falls back
+        # to insertion order, not recency, and confirm can resolve the
+        # wrong job. Preserve the original on edits (prior exists) --
+        # editing a proposal shouldn't bump when it was first created.
+        "created_at": (prior or {}).get("created_at") or _now_iso(),
     }
     _save_job(job)
     return job
@@ -425,6 +514,55 @@ def resume(job_id: str, background_tasks=None) -> str:
         background_tasks.add_task(_run, job_id)
         return f"Ruk, {job_id} resume ho gaya, chal rahi hai ab."
     return f"Ruk, {job_id} resume ho gaya -- \"continue karo {job_id}\" bolo agla chunk chalane ke liye."
+
+
+def edit_native_job(
+    job_id: str, weights: dict | None = None, caps: dict | None = None, mode: str | None = None,
+) -> str:
+    """Actually changes an ALREADY-CONFIRMED job's weights/caps/mode --
+    the piece identity.py claimed existed ("edit (weights/caps/schedule
+    actually change, not just the displayed text)") but genuinely
+    didn't: there was no edit path at all once a job left 'proposed'.
+    Ruk's only option was pause + remove + propose a whole new job,
+    losing round/result history. This is a real, additive data change
+    (not a state transition), routed through the SAME lock as every
+    other job mutation via _atomic_transition, so it can't race a
+    concurrent _run() the same way pause()/resume() already can't.
+
+    Partial update -- only keys actually mentioned change; everything
+    else on the job is left exactly as-is (merge, not replace, same
+    convention propose()'s prior/feedback merge already uses)."""
+    unknown_providers = [p for p in {**(weights or {}), **(caps or {})} if p not in MODELS]
+
+    def _mutate(j):
+        if weights:
+            j["weights"] = {**j.get("weights", {}), **{p: v for p, v in weights.items() if p in MODELS}}
+        if caps:
+            j["caps"] = {**j.get("caps", {}), **{p: v for p, v in caps.items() if p in MODELS}}
+        if mode:
+            j["mode"] = mode
+        return j
+
+    job, err = _atomic_transition(job_id, "edit", _mutate)
+    if err:
+        return err
+
+    events.log_event(
+        job_id, "sandy", "planning",
+        f"Job edited by Ruk -- weights={job['weights']}, caps={job['caps']}, mode={job['mode']}",
+        round=job.get("round", 0),
+    )
+    changed = []
+    if weights:
+        changed.append(f"weights -> {job['weights']}")
+    if caps:
+        changed.append(f"caps -> {job['caps']}")
+    if mode:
+        changed.append(f"mode -> {job['mode']}")
+    reply = f"Ruk, {job_id} update ho gaya: " + "; ".join(changed) + "."
+    if unknown_providers:
+        reply += f" (Ignore kiya -- ye real provider nahi hai: {', '.join(unknown_providers)}.)"
+    return reply
 
 
 def continue_now(job_id: str, background_tasks=None) -> str:
@@ -526,10 +664,12 @@ def _run(job_id: str) -> str:
         "plan above -- then write it."
     )
 
+    orchestrator = _top_weighted_provider(job["weights"])
     try:
         result = brain._orchestrate(
             task, context="", on_event=on_event, workers=worker_list, extra_workers=extra,
             provider_guard=_make_guard(job_id), should_continue=_should_continue(job_id),
+            orchestrator=orchestrator,
         )
         # scode: THE actual race this whole locking pass exists for --
         # confirmed live with a real threaded test before this fix: the

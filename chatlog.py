@@ -6,11 +6,10 @@ purely so Ruk's Home can show the real word-for-word conversation on
 page refresh. Called automatically alongside memory.remember(), same as
 memory itself: no one ever has to ask Sandy to log anything.
 """
-import os
 import re
 from datetime import date, datetime, timedelta, timezone
 
-from supabase import create_client
+import config
 
 from llm import log
 
@@ -56,18 +55,14 @@ def extract_date_range(message: str) -> tuple[str, str] | None:
 
     return None
 
-_client = None
-
-
 def _c():
-    global _client
-    if _client is None:
-        # Same credential resolution as config._db() -- SERVICE_KEY with
-        # SUPABASE_KEY fallback -- instead of a hard KeyError on the
-        # service key alone, which diverged from every other module.
-        key = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ["SUPABASE_KEY"]
-        _client = create_client(os.environ["SUPABASE_URL"], key)
-    return _client
+    """Was its own separate client (and, unlike config.py's, had no
+    SUPABASE_KEY fallback if SUPABASE_SERVICE_KEY wasn't set -- one of
+    the concrete divergences duplicated clients drift into). Now routes
+    through config.get_client(), the one real client for the process --
+    this also means the fake_db test fixture now actually covers
+    chatlog.py, which it silently didn't before."""
+    return config.get_client()
 
 
 def log(message: str, role: str) -> None:

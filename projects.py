@@ -37,21 +37,18 @@ not as a chat interface.
 import os
 
 import requests
-from supabase import create_client, Client
+from supabase import Client
+
+import config
 
 APPROVAL_GRADUATION_THRESHOLD = 3  # after this many Ruk-approved submissions on a
                                     # project, stop asking -- exactly what Ruk asked for
 
-_client: Client | None = None
-
 
 def _db() -> Client:
-    global _client
-    if _client is None:
-        url = os.environ["SUPABASE_URL"]
-        key = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ["SUPABASE_KEY"]
-        _client = create_client(url, key)
-    return _client
+    """Routes through config.get_client() -- the one real Supabase
+    client for the process -- instead of keeping its own copy."""
+    return config.get_client()
 
 
 def _default_model_limit(project_type: str) -> dict:
