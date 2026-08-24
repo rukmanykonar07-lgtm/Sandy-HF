@@ -6,6 +6,7 @@ selfmod.py's propose->approve->push flow, which exists specifically
 because THAT one writes files and pushes to git.
 """
 import os
+import re
 
 from llm import call_llm_with_fallback
 
@@ -57,9 +58,23 @@ def analyze(instruction: str) -> str:
     code") that names no specific file still gets the full repo, exactly
     as before -- that's a real use case, not the bug."""
     files = list_files()
-    named = [f for f in files if os.path.basename(f) in instruction or f in instruction]
+
+    def _mentions(path: str) -> bool:
+        # Word-boundary match: "search.py" matches in "is there a bug in
+        # search.py" but NOT inside "research.py" (no boundary before
+        # 's' there). Full rel paths ("plugins/foo.py") checked the same
+        # way, so a directory prefix can't create false hits either.
+        name = re.escape(os.path.basename(path))
+        full = re.escape(path)
+        return bool(
+            re.search(rf"(?<![\w.-]){name}(?![\w-])", instruction)
+            or re.search(rf"(?<![\w.-]){full}(?![\w-])", instruction)
+        )
+
+    named = [f for f in files if _mentions(f)]
     scoped = named or files
-    parts = [f"=== {p} ===\n{read_file(p)}" for p in scoped if read_file(p) is not None]
+    contents = ((p, read_file(p)) for p in scoped)
+    parts = [f"=== {p} ===\n{c}" for p, c in contents if c is not None]
     combined = "\n\n".join(parts)
 
     scope_label = f"the specific file(s) Ruk named" if named else "Sandy's entire current codebase"
@@ -95,9 +110,22 @@ if __name__ == "__main__":
     print(f"codebase.py: found {len(files)} files, read_file() OK ->", files[:5])
 
     # scode self-check: naming a real file scopes the request down to it;
-    # naming nothing keeps the old full-repo behavior.
-    named = [f for f in files if os.path.basename(f) in "is there a bug in search.py"]
+    # naming nothing keeps the old full-repo behavior. Mirrors analyze()'s
+    # real word-boundary matching -- the old substring self-check kept
+    # passing while validating logic analyze() no longer uses.
+    def _mentions_like_analyze(path: str, instruction: str) -> bool:
+        name = re.escape(os.path.basename(path))
+        full = re.escape(path)
+        return bool(
+            re.search(rf"(?<![\w.-]){name}(?![\w-])", instruction)
+            or re.search(rf"(?<![\w.-]){full}(?![\w-])", instruction)
+        )
+
+    named = [f for f in files if _mentions_like_analyze(f, "is there a bug in search.py")]
     assert named == ["search.py"], f"expected only search.py to match, got: {named}"
-    named_none = [f for f in files if os.path.basename(f) in "review everything please"]
+    assert not _mentions_like_analyze("search.py", "research.py explains it"), (
+        "word boundary broken -- 'research.py' scoped the scan to search.py"
+    )
+    named_none = [f for f in files if _mentions_like_analyze(f, "review everything please")]
     assert named_none == [], f"expected no file to match a broad request, got: {named_none}"
     print("codebase.py: analyze() scoping logic OK")

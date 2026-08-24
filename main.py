@@ -11,11 +11,14 @@ import json
 import os
 import re
 import asyncio
+import secrets
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, BackgroundTasks, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -35,27 +38,33 @@ import selfmod
 import youtube
 from llm import call_llm, call_llm_with_fallback, CapExceeded, MODELS, strip_json_fence, log
 
-app = FastAPI()
-
-
-@app.on_event("startup")
-async def _start_healing_loop():
+@asynccontextmanager
+async def _healing_loop_lifespan(app: FastAPI):
     """Real periodic failure check -- every 5 min while the container is
     awake. Honest limitation: HF Spaces free tier sleeps on idle, so this
     loop sleeps with it -- it's not a substitute for the opportunistic
     check in _handle_chat (which fires on every real message, the more
     reliable of the two), just an addition for whenever the container
     happens to be up with nobody actively chatting."""
-    async def _loop():
-        while True:
-            try:
-                alerts = await asyncio.to_thread(healing.run_check_and_alert)
-                if alerts:
-                    log(f"[healing] periodic loop: {len(alerts)} new failure(s) detected and alerted")
-            except Exception as e:
-                log(f"[healing] periodic loop error, continuing: {e!r}")
-            await asyncio.sleep(300)
-    asyncio.create_task(_loop())
+    if not os.environ.get("SANDY_AUTH_KEY"):
+        log("[auth] SANDY_AUTH_KEY not set -- auth gate is OPEN; set the HF secret to lock /chat down")
+    loop_task = asyncio.create_task(_heal_poll_loop())
+    yield
+    loop_task.cancel()
+
+
+async def _heal_poll_loop():
+    while True:
+        try:
+            alerts = await asyncio.to_thread(healing.run_check_and_alert)
+            if alerts:
+                log(f"[healing] periodic loop: {len(alerts)} new failure(s) detected and alerted")
+        except Exception as e:
+            log(f"[healing] periodic loop error, continuing: {e!r}")
+        await asyncio.sleep(300)
+
+
+app = FastAPI(lifespan=_healing_loop_lifespan)
 
 
 _TRIVIAL_WORDS = {
@@ -150,10 +159,41 @@ def _recall_context(query: str, skill: str | None = None) -> str:
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # ponytail: tighten to the real Ruk's Home domain once frontend is deployed
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Real frontend origins only -- "*" let any site fire quota-burning
+    # and approval-driving requests from a visitor's browser.
+    allow_origins=[o for o in [
+        os.environ.get("RUKS_HOME_ORIGIN"),   # set this HF secret to the real Ruk's Home URL
+        "http://localhost:7860",
+        "http://127.0.0.1:7860",
+    ] if o],
+    allow_methods=["GET", "POST"],
+    allow_headers=["X-Sandy-Key", "Content-Type"],
 )
+
+
+class AuthGateMiddleware(BaseHTTPMiddleware):
+    """Shared-secret gate: every /chat, /status and /api/* request must
+    carry X-Sandy-Key matching the SANDY_AUTH_KEY secret. Health/static
+    routes stay open so the Space's own liveness checks and the bundled
+    frontend assets keep working. With no key configured the gate is
+    open (fresh deploys don't lock themselves out), but a missing key is
+    logged loudly on startup so it can't stay unnoticed."""
+
+    OPEN_PATH_PREFIXES = ("/health", "/history", "/manifest.json", "/service-worker.js", "/static", "/assets")
+
+    async def dispatch(self, request: Request, call_next):
+        expected = os.environ.get("SANDY_AUTH_KEY")
+        path = request.url.path
+        if not expected or path == "/" or any(path.startswith(p) for p in self.OPEN_PATH_PREFIXES):
+            return await call_next(request)
+        provided = request.headers.get("x-sandy-key")
+        if provided and secrets.compare_digest(provided, expected):
+            return await call_next(request)
+        log(f"[auth] rejected unauthorized {request.method} {path}")
+        return JSONResponse(status_code=401, content={"detail": "invalid or missing X-Sandy-Key"})
+
+
+app.add_middleware(AuthGateMiddleware)
 
 class ChatRequest(BaseModel):
     message: str

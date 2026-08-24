@@ -44,10 +44,15 @@ def ensure_git_ready() -> None:
 
 
 def _run_git(*args: str) -> str:
+    """Runs git with the HF write token supplied via GIT_ASKPASS instead
+    of embedding it in a remote URL: a URL lands in /proc/<pid>/cmdline
+    (readable by every process in this container) for as long as git
+    runs; an askpass helper only ever exists inside this process's own
+    environment. Error scrubbing stays as defense-in-depth."""
     result = subprocess.run(
         ["git", "-C", REPO_DIR, *args],
         capture_output=True, text=True, timeout=30,
-        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0", **_git_auth_env()},
     )
     if result.returncode != 0:
         err = result.stderr.strip() or f"git {args[0]} failed"
@@ -58,15 +63,31 @@ def _run_git(*args: str) -> str:
     return result.stdout.strip()
 
 
-def _auth_url() -> str:
-    """Standard HF-documented pattern for scripted git access: token
-    embedded in the URL. Used for both fetch and push -- _run_git()
-    above scrubs the token from any error text regardless, so this
-    doesn't reopen the original leak concern."""
+_ASKPASS_PATH = os.path.join("/tmp", "sandy_askpass.sh")
+
+
+def _git_auth_env() -> dict[str, str]:
+    """Writes a tiny askpass script (once per process) that echoes
+    HF_WRITE_TOKEN, and returns the env vars pointing git at it."""
     token = os.environ.get("HF_WRITE_TOKEN")
     if not token:
-        raise GitOpError("HF_WRITE_TOKEN not set -- can't push")
-    return f"https://user:{token}@huggingface.co/spaces/Rukmany/RuksHome"
+        raise GitOpError("HF_WRITE_TOKEN not set -- can't talk to origin")
+    if not os.path.exists(_ASKPASS_PATH):
+        with open(_ASKPASS_PATH, "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\necho \"$HF_WRITE_TOKEN\"\n")
+        os.chmod(_ASKPASS_PATH, 0o700)
+    return {
+        "GIT_ASKPASS": _ASKPASS_PATH,
+        "GIT_USERNAME": "oauth",
+        # Remote used for fetch/push must be plain (no token in it).
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "credential.helper",
+        "GIT_CONFIG_VALUE_0": "",
+    }
+
+
+def _origin_url() -> str:
+    return "https://huggingface.co/spaces/Rukmany/RuksHome"
 
 
 def _assert_up_to_date() -> None:
@@ -78,7 +99,7 @@ def _assert_up_to_date() -> None:
     which has no credentials in the container) -- fetching by explicit
     URL doesn't update the origin/main tracking ref, so FETCH_HEAD is
     what actually holds the result here."""
-    _run_git("fetch", _auth_url(), "main")
+    _run_git("fetch", "origin", "main")
     if _run_git("rev-parse", "HEAD") != _run_git("rev-parse", "FETCH_HEAD"):
         raise GitOpError(
             "Ruk, is container ka code origin/main se peeche hai (shayad "
@@ -87,10 +108,22 @@ def _assert_up_to_date() -> None:
         )
 
 
+def _contained_path(file_path: str) -> str | None:
+    """Repo-rooted absolute path, or None if file_path tries to escape
+    the repo (path traversal). Same guard as codebase.read_file --
+    selfmod WRITES files, so it needs this even more."""
+    full = os.path.normpath(os.path.join(REPO_DIR, file_path))
+    if not full.startswith(os.path.normpath(REPO_DIR) + os.sep):
+        return None
+    return full
+
+
 def propose_edit(session_id: str, file_path: str, instruction: str) -> str:
     """Step 1: generates the proposed new file content and shows a diff
     -- writes NOTHING to disk yet, commits nothing, pushes nothing."""
-    full_path = os.path.join(REPO_DIR, file_path)
+    full_path = _contained_path(file_path)
+    if full_path is None:
+        return f"Ruk, {file_path} repo ke bahar ja raha hai -- sirf apne repo ki files edit kar sakti hoon."
     if not os.path.isfile(full_path):
         return f"Ruk, {file_path} naam ki file nahi mili repo mein."
 
@@ -150,14 +183,16 @@ def apply_pending(session_id: str) -> str:
     ensure_git_ready()
     _assert_up_to_date()
 
-    full_path = os.path.join(REPO_DIR, pending["file_path"])
+    full_path = _contained_path(pending["file_path"])
+    if full_path is None:
+        return "Ruk, ye pending edit repo ke bahar likhta -- reject kar diya."
     with open(full_path, "w", encoding="utf-8") as f:
         f.write(pending["new_content"])
 
     _run_git("add", pending["file_path"])
     _run_git("-c", "user.email=sandy@ruks-home.local", "-c", "user.name=Sandy",
               "commit", "-m", pending["commit_message"])
-    _run_git("push", _auth_url(), "main")
+    _run_git("push", "origin", "main")
     return f"Done, Ruk — {pending['file_path']} push ho gaya, HF rebuild ho raha hai ab."
 
 
@@ -186,5 +221,5 @@ def rollback_to(commit_hash: str) -> str:
             "commits usी jagah ko phir se change kar chuke hain, conflict "
             "aa raha hai. Manually resolve karna padegा, auto-revert safe nahi hai yahan."
         )
-    _run_git("push", _auth_url(), "main")
+    _run_git("push", "origin", "main")
     return f"Done, Ruk — {commit_hash} revert ho gaya, redeploy ho raha hai."

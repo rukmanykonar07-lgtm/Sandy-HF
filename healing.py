@@ -155,6 +155,28 @@ def propose_fix(diag: dict, job: dict | None = None) -> dict | None:
     return None
 
 
+def _stale_failure(j: dict, client) -> bool:
+    """True if the newest RESOLVED ledger row for this job is newer than
+    the job's last_error timestamp -- i.e. a fix was already applied for
+    this exact failure, and Hermes just hasn't cleared last_error yet.
+    Without this check, every poll between 'fix applied' and 'Hermes
+    clears the error' re-alerts the same failure (the dedup query above
+    only matches UNRESOLVED rows). Jobs with no timestamp on their error
+    are never considered stale -- better one duplicate than zero alerts."""
+    jid = j["id"]
+    err_time = j.get("last_error_at") or j.get("updated_at") or ""
+    if not err_time:
+        return False
+    res = (
+        client.table(_TABLE).select("resolved_at")
+        .eq("job_ref", jid).eq("is_resolved", True)
+        .order("resolved_at", desc=True).limit(1).execute()
+    )
+    if not res.data or not res.data[0].get("resolved_at"):
+        return False
+    return res.data[0]["resolved_at"] > err_time
+
+
 def check_for_new_failures() -> list[dict]:
     """Compares current job states against the healing_ledger (real
     table, not a jsonb dedup blob) and fires only on a REAL new failure
@@ -181,6 +203,8 @@ def check_for_new_failures() -> list[dict]:
         is_failing = bool(error_text) or j.get("state") == "failed"
         if not is_failing:
             continue
+        if _stale_failure(j, client):
+            continue  # fix already applied; Hermes just hasn't cleared last_error yet
         diag = classify_error(error_text or "job state is 'failed', no error text captured", entity=j.get("name") or "unknown")
         diag = _dig_deeper(diag, j)
         existing = (

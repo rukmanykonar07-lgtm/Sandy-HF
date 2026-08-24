@@ -12,6 +12,8 @@ from datetime import date, datetime, timedelta, timezone
 
 from supabase import create_client
 
+from llm import log
+
 _N_DAYS_AGO_RE = re.compile(r"(\d+)\s*din\s*pehle|(\d+)\s*days?\s*ago", re.IGNORECASE)
 _LAST_WEEK_RE = re.compile(r"\blast week\b|\bpichhle hafte\b|\bpichle hafte\b", re.IGNORECASE)
 _THIS_WEEK_RE = re.compile(r"\bthis week\b|\bis hafte\b", re.IGNORECASE)
@@ -60,9 +62,11 @@ _client = None
 def _c():
     global _client
     if _client is None:
-        _client = create_client(
-            os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"]
-        )
+        # Same credential resolution as config._db() -- SERVICE_KEY with
+        # SUPABASE_KEY fallback -- instead of a hard KeyError on the
+        # service key alone, which diverged from every other module.
+        key = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ["SUPABASE_KEY"]
+        _client = create_client(os.environ["SUPABASE_URL"], key)
     return _client
 
 
@@ -71,17 +75,19 @@ def log(message: str, role: str) -> None:
     than 30 days. Mem0 already extracted permanent facts from every
     message the moment it was first logged, so nothing is actually lost
     -- only the verbatim copy ages out. Best-effort -- logging/pruning
-    hiccups should never break the actual chat response, which is why
-    this only ever runs as a background task (see main.py's _remember())."""
+    hiccups should never break the actual chat response (this runs as a
+    background task, see main.py's _remember()), but failures are now
+    logged to /tmp/sandy.log instead of vanishing into `except: pass` --
+    a silent chat_log gap looked exactly like Sandy forgetting things."""
     try:
         _c().table("chat_log").insert({"role": role, "message": message}).execute()
-    except Exception:
-        pass
+    except Exception as e:
+        log(f"[chatlog] insert failed for {role} message: {e!r}")
     try:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
         _c().table("chat_log").delete().lt("created_at", cutoff).execute()
-    except Exception:
-        pass
+    except Exception as e:
+        log(f"[chatlog] 30-day prune failed: {e!r}")
 
 
 def get_history_in_range(start_date: str, end_date: str) -> list[dict]:
