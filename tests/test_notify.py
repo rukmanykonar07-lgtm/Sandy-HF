@@ -3,7 +3,7 @@
 Covers: severity normalization, cooldown dedup (and its critical
 exemption), severity->channel routing matrix, per-channel failure
 isolation, and the never-raises guarantee. All HTTP is mocked at the
-requests boundary -- no real network, no sidecar needed.
+requests boundary -- no real network, no network needed.
 """
 import sys
 import threading
@@ -44,7 +44,7 @@ class NotifyTestBase(unittest.TestCase):
                 "TWILIO_AUTH_TOKEN": "tw-token",
                 "TWILIO_FROM": "+15550001111",
                 "TWILIO_TO": "+15552223333",
-                "RUK_WHATSAPP_NUMBER": "15559998888",
+                "TELEGRAM_BOT_TOKEN": "tg-token", "TELEGRAM_CHAT_ID": "12345",
             },
         )
         self._env_patcher.start()
@@ -80,13 +80,13 @@ class NotifyTestBase(unittest.TestCase):
 
 
 class TestSeverityMatrix(NotifyTestBase):
-    def test_info_reaches_whatsapp_email_not_twilio(self):
+    def test_info_reaches_telegram_email_not_twilio(self):
         with mock.patch.object(notify.requests, "post", return_value=_Resp(200)) as post, \
              mock.patch.object(notify.requests, "get", return_value=_Resp(200)) as get:
             notify.alert("T", "b", severity="info")
             _wait_for_workers()
             urls = [c.args[0] for c in post.call_args_list]
-            self.assertTrue(any("3001/send" in u for u in urls))
+            self.assertTrue(any("api.telegram.org" in u for u in urls))
             self.assertTrue(any("mailhook.example" in u for u in urls))
             self.assertFalse(any("twilio.com" in u for u in urls))
 
@@ -124,7 +124,7 @@ class TestCooldown(NotifyTestBase):
             _wait_for_workers()
             self.assertTrue(r1["queued"] and not r1["deduped"])
             self.assertFalse(r2["queued"] and r2["deduped"])
-            sends = [c for c in post.call_args_list if "3001/send" in c.args[0]]
+            sends = [c for c in post.call_args_list if "api.telegram.org" in c.args[0]]
             self.assertEqual(len(sends), 1)
 
     def test_critical_never_dedupes(self):
@@ -140,15 +140,15 @@ class TestCooldown(NotifyTestBase):
             notify.alert("A", "x", severity="warn")
             notify.alert("B", "y", severity="warn")
             _wait_for_workers()
-            sends = [c for c in post.call_args_list if "3001/send" in c.args[0]]
+            sends = [c for c in post.call_args_list if "api.telegram.org" in c.args[0]]
             self.assertEqual(len(sends), 2)
 
 
 class TestChannelIsolation(NotifyTestBase):
-    def test_sidecar_down_falls_back_to_callmebot(self):
+    def test_telegram_down_falls_back_to_callmebot(self):
         def post_side(url, **kw):
-            if "3001/send" in url:
-                raise ConnectionError("sidecar dead")
+            if "api.telegram.org" in url:
+                raise ConnectionError("telegram down")
             return _Resp(200)
 
         with mock.patch.object(notify.requests, "post", side_effect=post_side), \

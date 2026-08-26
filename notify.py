@@ -1,15 +1,16 @@
 """Part 7 -- AlertRouter: Sandy's single outbound-notification chokepoint.
 
 Replaces the old direct Meta Cloud API send_whatsapp() that lived in
-projects.py (and which healing.py imported). The WHATSAPP_* env vars are
-DEPRECATED -- WhatsApp now flows through the local Baileys sidecar
-(node-service/server.js, bound to 127.0.0.1:3001) that Ruk pairs exactly
-once by scanning a QR printed to the container logs; session credentials
-persist in sandy_config[baileys_creds] so rebuilds reconnect silently.
+projects.py (and which healing.py imported). Instant messages flow through
+the OFFICIAL Telegram Bot API (TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID env
+vars -- create a bot via @BotFather, send it any message, read chat_id
+from getUpdates). The old Baileys WhatsApp sidecar was removed after HF's
+moderation flagged unofficial WhatsApp automation; CallMeBot stays as an
+optional fallback channel. WHATSAPP_* env vars remain deprecated.
 
 Severity matrix (master plan Part 7):
-    info/warn  -> WhatsApp (+ email if configured, + CallMeBot fallback
-                  if WhatsApp fails and CallMeBot is configured)
+    info/warn  -> Telegram (+ email if configured, + CallMeBot fallback
+                  if Telegram fails and CallMeBot is configured)
     critical   -> all of the above PLUS a Twilio voice call reading the
                   message aloud twice (<Say loop="2">)
 
@@ -34,7 +35,6 @@ from llm import log
 SEVERITIES = ("info", "warn", "critical")
 
 _ALERT_COOLDOWN_S = int(os.environ.get("ALERT_COOLDOWN_S", "900"))
-_BAILEYS_URL = os.environ.get("BAILEYS_URL", "http://127.0.0.1:3001")
 _HTTP_TIMEOUT = 6
 
 # (title, severity) -> monotonic timestamp of last dispatch attempt
@@ -65,23 +65,29 @@ def _mark_sent(title: str, severity: str) -> None:
 # Each returns {"ok": bool, "detail": str}. "disabled" in detail means the
 # channel isn't configured (expected on day one) -- that's not an error.
 
-def _send_whatsapp(text: str) -> dict:
-    """POST to the Baileys sidecar. Unreachable sidecar is a normal,
-    logged condition (e.g. during boot or if Node died) -- never fatal."""
+def _send_telegram(text: str) -> dict:
+    """POST to the official Telegram Bot API sendMessage. Missing token
+    or chat id => channel disabled (normal on day one). Never fatal."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not (token and chat_id):
+        return {"ok": False, "detail": "disabled"}
     try:
         r = requests.post(
-            f"{_BAILEYS_URL}/send", json={"text": text}, timeout=_HTTP_TIMEOUT
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+            timeout=_HTTP_TIMEOUT,
         )
         if r.status_code == 200:
             return {"ok": True, "detail": "sent"}
-        return {"ok": False, "detail": f"sidecar HTTP {r.status_code}: {r.text[:120]}"}
+        return {"ok": False, "detail": f"telegram HTTP {r.status_code}: {r.text[:120]}"}
     except Exception as e:
-        return {"ok": False, "detail": f"sidecar unreachable: {e!r}"}
+        return {"ok": False, "detail": f"telegram unreachable: {e!r}"}
 
 
 def _send_callmebot(text: str) -> dict:
-    """Optional last-resort WhatsApp path (no sidecar needed). Off unless
-    CALLMEBOT_PHONE + CALLMEBOT_APIKEY are set."""
+    """Optional last-resort WhatsApp path via CallMeBot's free gateway.
+    Off unless CALLMEBOT_PHONE + CALLMEBOT_APIKEY are set."""
     phone = os.environ.get("CALLMEBOT_PHONE")
     apikey = os.environ.get("CALLMEBOT_APIKEY")
     if not phone or not apikey:
@@ -153,8 +159,8 @@ def _dispatch(title: str, body: str, severity: str) -> dict:
     text = f"{title}\n{body}"
     channels: dict[str, dict] = {}
 
-    channels["whatsapp"] = _send_whatsapp(text)
-    if not channels["whatsapp"]["ok"]:
+    channels["telegram"] = _send_telegram(text)
+    if not channels["telegram"]["ok"]:
         channels["callmebot_fallback"] = _send_callmebot(text)
 
     channels["email"] = _send_email(subject=title, body=body)

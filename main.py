@@ -60,23 +60,16 @@ async def _healing_loop_lifespan(app: FastAPI):
     try:
         import notify
         missing = []
-        for env_name, what in (("TWILIO_SID", "critical phone calls"),
+        for env_name, what in (("TELEGRAM_BOT_TOKEN", "Telegram instant alerts"),
+                               ("TWILIO_SID", "critical phone calls"),
                                ("SUPABASE_SERVICE_KEY", "Supabase (memory/usage/jobs)")):
             if not os.environ.get(env_name):
                 missing.append(f"{env_name} ({what})")
-        baileys_up = None
-        try:
-            r = requests.get(f"{notify._BAILEYS_URL}/status", timeout=3)
-            baileys_up = bool(r.json().get("connected"))
-        except Exception:
-            baileys_up = False
-        if baileys_up is False:
-            missing.append("Baileys sidecar not connected yet (WhatsApp alerts offline until QR pairing)")
         if missing:
             notify.alert(
                 title="Sandy booted with degraded subsystems",
                 body="Boot hua, par ye cheezein abhi missing/off hain: " + "; ".join(missing) +
-                     ". Fix: HF secrets add karo / QR scan karo -- details container logs mein.",
+                     ". Fix: HF secrets add karo -- details container logs mein.",
                 severity="info",
                 meta={"missing": missing},
             )

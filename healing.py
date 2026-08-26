@@ -241,9 +241,8 @@ def alert_and_store(alerts: list[dict]) -> None:
     """Stores each alert as a healing_ledger row (root cause + fix, or
     root cause alone if there's no safe auto-fix) so a later
     'haan'/'fix it' in chat can apply it, then routes the notification
-    through notify.AlertRouter (WhatsApp via Baileys sidecar; criticals
-    also phone). Severity: blocked/repeated failures are critical,
-    everything else warn."""
+    through notify.AlertRouter (Telegram; criticals also phone).
+    Severity: blocked/repeated failures are critical, everything else warn."""
     import config
 
     client = config.get_client()
