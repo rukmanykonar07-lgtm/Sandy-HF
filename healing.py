@@ -194,6 +194,24 @@ def check_for_new_failures() -> list[dict]:
             all_jobs.append(j)
     except Exception as e:
         log(f"[healing] hermes job list read failed: {e!r}")
+        # Same honesty rule as job failures, applied to the gateway
+        # itself: don't just log -- say what broke, why, and the fix.
+        # notify's own cooldown dedups repeat polls to one ping per
+        # ALERT_COOLDOWN window.
+        _notify_alert(
+            title="Hermes gateway unreachable",
+            body=(
+                "KYA HUA: Hermes ke cron jobs ki list padh nahi payi -- "
+                "gateway process down ya crash hua lagta hai.\n"
+                f"ERROR: {e!r}\n"
+                "FIX: container logs mein gateway/supervisord section dekho "
+                "(supervisorctl status, restart gateway). Sandy ke native "
+                "jobs abhi bhi monitor ho rahe hain -- sirf Hermes-side "
+                "jobs is window mein andhi hain."
+            ),
+            severity="warn",
+            meta={"subsystem": "hermes_gateway", "error": repr(e)[:300]},
+        )
     all_jobs += native_mastery.status_shape()
 
     client = config.get_client()
