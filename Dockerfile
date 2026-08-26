@@ -10,6 +10,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Baileys sidecar deps (Part 7): installed at BUILD time with a pinned
+# cache mount so rebuilds stay fast; runtime never touches npm.
+COPY node-service/package.json node-service/package-lock.json* /app/node-service/
+RUN cd /app/node-service \
+    && (npm ci --omit=dev 2>/dev/null || npm install --omit=dev)
+
 COPY . .
 RUN chmod +x entrypoint.sh
 

@@ -22,6 +22,18 @@ python3 -c "import config; config.restore_hermes_jobs()" || echo "[entrypoint] j
 supervisord -c /app/supervisord.conf &
 SUPERVISOR_PID=$!
 
+# Baileys WhatsApp sidecar (Part 7): binds 127.0.0.1:3001 only, so it's
+# unreachable from outside the container -- no auth needed. Started
+# before FastAPI; if node or the pairing is missing, notify.py's
+# channels just report not_connected and alerts fall back to
+# CallMeBot/email/logs. Never blocks boot.
+if [ -d /app/node-service/node_modules ]; then
+  (cd /app/node-service && node server.js >>/tmp/baileys.log 2>&1) &
+  BAILEYS_PID=$!
+else
+  echo "[entrypoint] node-service deps missing -- WhatsApp sidecar off this boot"
+fi
+
 # Gateway now logs to real files (supervisord.conf), not /dev/stdout
 # directly, so Sandy's own process can read them (diagnostics.py). Tail
 # both back out to this script's own stdout/stderr so HF's live log
@@ -35,7 +47,7 @@ TAIL_ERR_PID=$!
 uvicorn main:app --host 0.0.0.0 --port 7860 &
 FASTAPI_PID=$!
 
-trap 'kill -TERM $FASTAPI_PID 2>/dev/null; kill -TERM $SUPERVISOR_PID 2>/dev/null; kill -TERM $TAIL_OUT_PID $TAIL_ERR_PID 2>/dev/null' TERM INT
+trap 'kill -TERM $FASTAPI_PID 2>/dev/null; kill -TERM $SUPERVISOR_PID 2>/dev/null; kill -TERM $TAIL_OUT_PID $TAIL_ERR_PID 2>/dev/null; kill -TERM $BAILEYS_PID 2>/dev/null' TERM INT
 
 # Only FastAPI's exit reaches this line — a gateway crash is fully
 # absorbed by supervisord above and never triggers shutdown.

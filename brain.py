@@ -8,13 +8,37 @@ Decides HOW to answer a task:
 Ruk can always override with plain language ("use only gemini",
 "start orchestrator mode") — that's parsed in main.py and passed in
 here as `override`, which always wins over auto-classification.
+
+Orchestration shape (Part 6 conformance, verified against _orchestrate
+2026-08-26 -- this docstring is the contract):
+
+    Research  -> Gemini researches multiple angles BEFORE planning
+    Plan      -> 2-4 concrete sub-tasks, each with its research slice
+    Dispatch  -> workers execute in parallel (ThreadPoolExecutor)
+    HARD BARRIER -> orch_barrier_map: NO new work until EVERY worker
+                 of the round has returned (or the stall watchdog cuts
+                 the round loose with best-so-far)
+    Review    -> per-worker self-check (_self_check_output), THEN one
+                 orchestrator pass reviewing ALL outputs together,
+                 specifically hunting CONFLICTS between workers
+    Combine   -> conflicts surfaced/arbitrated, gaps become next round's
+                 sub-tasks; research IS allowed mid-run (review step can
+                 request one targeted extra search per round)
+
+Rounds repeat up to MAX_ORCHESTRATOR_ROUNDS; every LLM call in every
+phase flows through _counted/_call_guarded so MAX_ORCH_CALLS is a true
+per-request ceiling, and each return doubles as the stall watchdog's
+progress heartbeat.
 """
 import ast
 import concurrent.futures
 import json
+import os
 import re
+import threading
 import time
 
+import llm
 import mastery
 import search
 from llm import call_llm, call_llm_with_fallback, CapExceeded, MODELS, strip_fence, strip_json_fence, log
@@ -82,6 +106,106 @@ TIERS = {
 }
 MAX_ORCHESTRATOR_ROUNDS = 3  # ponytail: hard stop so a bad loop can't burn the whole day's cap
 MAX_ORCH_CALLS = 16          # scode: per-request ceiling on TOTAL orchestrator LLM calls
+
+# --- Part 6 stall watchdog -----------------------------------------------
+# One orchestration effectively runs at a time (it IS the chat reply), so a
+# single module-level record suffices. Every LLM RETURN inside _orchestrate
+# passes through _counted/_call_guarded, which stamp last_progress_at; a
+# barrier that sees no progress for orch_stall_seconds (sandy_config key
+# "orch_stall_seconds", env ORCH_STALL_SECONDS, default 180) releases with
+# best-so-far instead of hanging forever. Each run stamps the clock afresh
+# at entry, so a crashed predecessor can never poison the next run -- that
+# is why there is no explicit teardown at the many return sites.
+_ORCH = {"task": None, "started_at": 0.0, "last_progress_at": 0.0}
+_orch_lock = threading.Lock()
+
+
+def _orch_note_start(task: str) -> None:
+    now = time.time()
+    with _orch_lock:
+        _ORCH.update(task=(task or "")[:80], started_at=now, last_progress_at=now)
+
+
+def _orch_note_progress() -> None:
+    with _orch_lock:
+        _ORCH["last_progress_at"] = time.time()
+
+
+def orch_stalled_for() -> float:
+    """Seconds since the last orchestrator LLM return (0.0 when idle --
+    idle means no active run, so nothing can be 'stalled')."""
+    with _orch_lock:
+        if not _ORCH["task"]:
+            return 0.0
+        return max(0.0, time.time() - _ORCH["last_progress_at"])
+
+
+def _stall_seconds() -> float:
+    raw = None
+    try:
+        import config  # deferred: brain stays importable with no Supabase env
+
+        raw = config.get_config("orch_stall_seconds")
+    except Exception:
+        pass
+    if raw is None:
+        raw = os.environ.get("ORCH_STALL_SECONDS")
+    try:
+        return float(raw) if raw is not None else 180.0
+    except (TypeError, ValueError):
+        return 180.0
+
+
+def orch_barrier_map(pool, fn, items, *, what: str, on_event=None):
+    """The hard barrier, made interruptible. Preserves pool.map order
+    (results line up with `items`) -- but a round whose workers stop
+    making progress for _stall_seconds() can no longer hold the whole
+    orchestration hostage: finished sub-task results are kept as-is,
+    stuck slots are filled with an explicit watchdog note, ONE critical
+    alert fires, and the pipeline continues with best-so-far (same
+    graceful-degrade spirit as the all-providers-failed path).
+
+    Design honesty: the watchdog polls HERE, inside the waiting thread,
+    because a thread blocked in pool.map cannot be unblocked from
+    outside. Workers still running at release keep going until
+    llm.LLM_TIMEOUT_S bounds their HTTP call, then die inside
+    _run_subtask/_run_gap's own error handling; the executor's context
+    exit joins them, so the post-release wait is bounded (~one timeout),
+    not infinite. LLM_TIMEOUT_S (90s) sits well under the default stall
+    threshold (180s) so the watchdog stays a rare backstop, not the norm."""
+    futures = [pool.submit(fn, item) for item in items]
+    while True:
+        if all(f.done() for f in futures):
+            return [f.result() for f in futures]
+        if orch_stalled_for() > _stall_seconds():
+            for f in futures:
+                f.cancel()  # only cancels not-yet-started work; running threads expire via LLM_TIMEOUT_S
+            done_n = sum(1 for f in futures if f.done())
+            out = [
+                f.result() if f.done()
+                else "(this sub-task was cut loose by the stall watchdog -- "
+                     "providers stopped responding; best-so-far returned)"
+                for f in futures
+            ]
+            body = (
+                f"Orchestration '{_ORCH.get('task') or 'run'}' had no LLM progress for "
+                f"{int(orch_stalled_for())}s during {what}; released the barrier with "
+                f"{done_n}/{len(futures)} sub-tasks finished."
+            )
+            log(f"[brain.stall-watchdog] {body}")
+            if on_event:
+                try:
+                    on_event("obstacle", body, 0, None, None)
+                except Exception as e:
+                    log(f"[brain.stall-watchdog] on_event hook failed, continuing: {e!r}")
+            try:
+                import notify  # deferred: circular-import avoidance (projects.py precedent)
+
+                notify.alert("Sandy orchestration stalled", body, severity="critical")
+            except Exception as e:
+                log(f"[brain.stall-watchdog] alert failed (non-fatal): {e!r}")
+            return out
+        time.sleep(1.0)
                              # (plan + workers + reviews + replans + gap rounds). A task that's
                              # genuinely progressing finishes well under this; hitting it means
                              # the loop is stuck repeating itself -- degrade to best-so-far
@@ -302,6 +426,8 @@ def _judge(task: str, answers: dict[str, str], confidences: dict[str, tuple[int 
     prompt = (
         f"Task: {task}\n\nHere are answers from different models:\n{joined}{conf_note}\n\n"
         "Write the single best final answer, merging the strongest parts. "
+        "The inputs may come from different models with different tones -- "
+        "normalize style/formatting so the final answer reads as one coherent voice. "
         "Output only the final answer, no commentary."
     )
     return call_llm_with_fallback("gemini", [_MERGE_MSG, {"role": "user", "content": prompt}], caller="brain.judge")
@@ -332,13 +458,18 @@ def _run_tier(task: str, providers: list[str], context: str, history: list[dict]
                 last_error = e
                 continue
     if not answers:
-        for p in [m for m in MODELS if m not in providers]:  # last resort: try what this tier never had
+        # scode: the tier pool is dead -- before declaring total failure,
+        # try the EXTENDED pool (every provider with a live key + closed
+        # breaker, role-matched first), ordered by remaining daily-cap
+        # headroom. This is the plan's exhaustion ladder: healthy -> warn
+        # -> exhausted -> extended pool -> graceful all-dead message.
+        for p in llm.extended_pool():
             try:
-                raw = call_llm(p, messages, caller="brain.run_tier.last_resort")
+                raw = call_llm(p, messages, caller="brain.run_tier.extended_pool")
                 clean, _, _ = _extract_confidence(raw)
                 return clean
             except Exception as e:
-                log(f"[brain._run_tier] last-resort provider '{p}' also failed: {e!r}")
+                log(f"[brain._run_tier] extended-pool provider '{p}' also failed: {e!r}")
                 last_error = e
         raise CapExceeded(str(last_error) if last_error else "all providers for this tier are capped")
     if len(answers) == 1:
@@ -425,6 +556,16 @@ def _research(topic: str, angle: str = "", log_list: list[dict] | None = None, c
             results = _cached_search(q, provider)
             block = "\n".join(f"- {r['title']}: {r['content'][:300]}" for r in results[:3])
             if block:
+                # scraply follow-up: read the top result's actual page, not
+                # just the snippet -- one cheap fast-mode scrape per query,
+                # capped in scraply itself so token discipline holds.
+                try:
+                    import scraply
+                    pages = scraply.fetch_top(results[:3], n=1)
+                    if pages:
+                        block += f"\n\nFull page ({pages[0]['url']}):\n{pages[0]['markdown']}"
+                except Exception as se:
+                    log(f"[brain._research] scraply follow-up skipped: {se!r}")
                 findings.append(f"[{q} via {provider}]\n{block}")
             if log_list is not None:
                 log_list.append({"query": q, "provider": provider, "source": "gemini-research", "ok": True})
@@ -504,6 +645,7 @@ def _orchestrate(
     orchestrator = orchestrator or "gemini"
     workers = workers or ["groq", "cerebras"]
     extra_workers = extra_workers or []
+    _orch_note_start(task)  # stall-watchdog: fresh clock per run; a crashed predecessor can't poison this one
 
     # scode: every LLM call this request makes goes through one of these
     # two wrappers so the ceiling counts real calls, not rounds.
@@ -516,7 +658,9 @@ def _orchestrate(
         if not _budget_left():
             raise CapExceeded(f"orchestrator call budget ({MAX_ORCH_CALLS}) exhausted")
         budget["n"] += 1
-        return call_llm_with_fallback(provider, msgs, caller=caller)
+        out = call_llm_with_fallback(provider, msgs, caller=caller)
+        _orch_note_progress()  # stall-watchdog heartbeat: an LLM RETURN is progress
+        return out
 
     def _call_guarded(worker: str, msgs: list[dict]):
         """call_llm, but skips straight to the orchestrator fallback if
@@ -534,7 +678,9 @@ def _orchestrate(
             except Exception as e:
                 log(f"[brain._orchestrate] provider_guard errored, treating as OK: {e!r}")
         budget["n"] += 1
-        return call_llm(worker, msgs, caller="brain.orchestrate.worker")
+        out = call_llm(worker, msgs, caller="brain.orchestrate.worker")
+        _orch_note_progress()  # stall-watchdog heartbeat
+        return out
     research_log: list[dict] = []  # every search this run makes: query, provider, source, ok/fail --
                                     # lets the review step check tools are actually working and
                                     # workers aren't quietly duplicating each other's searches
@@ -615,18 +761,35 @@ def _orchestrate(
             raw = _call_guarded(worker, msgs)
         except Exception as e:
             log(f"[brain._orchestrate] worker '{worker}' failed, trying orchestrator fallback: {e!r}")
-            try:
-                raw = _counted(orchestrator, msgs, caller="brain.orchestrate.worker_fallback")
-            except Exception as e2:
-                log(f"[brain._orchestrate] worker '{worker}' fallback also failed: {e2!r}")
-                return f"(this sub-task could not be completed: {sub_task} -- all providers failed)", (None, "")
+            # scode: zero-loss failover -- before giving up on this sub-task,
+            # walk the EXTENDED pool (healthy providers, role-matched first,
+            # most cap headroom first), skipping who already failed. Same
+            # subtask prompt goes to the replacement (nothing was lost --
+            # non-streaming means a dead provider never emitted a half
+            # answer); budget ceiling still applies to every attempt.
+            raw = None
+            for alt in llm.extended_pool():
+                if alt in (worker, orchestrator):
+                    continue
+                try:
+                    raw = _counted(alt, msgs, caller="brain.orchestrate.worker_replacement")
+                    log(f"[brain._orchestrate] sub-task rescued by extended-pool provider '{alt}'")
+                    break
+                except Exception as e2:
+                    log(f"[brain._orchestrate] replacement '{alt}' also failed: {e2!r}")
+            if raw is None:
+                try:
+                    raw = _counted(orchestrator, msgs, caller="brain.orchestrate.worker_fallback")
+                except Exception as e3:
+                    log(f"[brain._orchestrate] all providers failed sub-task '{sub_task[:60]}': {e3!r}")
+                    return f"(this sub-task could not be completed: {sub_task} -- all providers failed)", (None, "")
         clean, conf, reason = _extract_confidence(raw)
         checked = _self_check_output(worker, sub_task, clean, count_fn=_counted)
         _emit("worker_call", f"{worker} finished sub-task: {sub_task[:80]}", provider=worker, detail=checked[:500])
         return checked, (conf, reason)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(subtasks)) as pool:
-        subtask_out = list(pool.map(_run_subtask, enumerate(subtasks)))
+        subtask_out = orch_barrier_map(pool, _run_subtask, enumerate(subtasks), what="worker dispatch", on_event=on_event)
     results = [r for r, _ in subtask_out]
     confidences = {f"worker_{i}": c for i, (_, c) in enumerate(subtask_out)}
 
@@ -636,11 +799,24 @@ def _orchestrate(
             raw = _call_guarded(worker, msgs)
         except Exception as e:
             log(f"[brain._orchestrate] gap worker '{worker}' failed, trying orchestrator fallback: {e!r}")
-            try:
-                raw = _counted(orchestrator, msgs, caller="brain.orchestrate.gap_fallback")
-            except Exception as e2:
-                log(f"[brain._orchestrate] gap worker '{worker}' fallback also failed: {e2!r}")
-                return f"(gap sub-task could not be completed: {sub_text})"
+            # scode: same extended-pool rescue as _run_subtask -- a capped or
+            # dead gap worker never kills the sub-task while any healthy
+            # provider remains (budget ceiling still applies per attempt).
+            raw = None
+            for alt in llm.extended_pool():
+                if alt in (worker, orchestrator):
+                    continue
+                try:
+                    raw = _counted(alt, msgs, caller="brain.orchestrate.gap_replacement")
+                    break
+                except Exception:
+                    continue
+            if raw is None:
+                try:
+                    raw = _counted(orchestrator, msgs, caller="brain.orchestrate.gap_fallback")
+                except Exception as e2:
+                    log(f"[brain._orchestrate] gap worker '{worker}' all providers failed: {e2!r}")
+                    return f"(gap sub-task could not be completed: {sub_text})"
         return _self_check_output(worker, sub_text, raw, count_fn=_counted)
 
     for _round in range(MAX_ORCHESTRATOR_ROUNDS):
@@ -740,18 +916,29 @@ def _orchestrate(
             log(f"[brain._orchestrate] replan failed, stopping loop early: {e!r}")
             return results[-1]
         # scode: task needed a genuine replan -- it's harder than the original
-        # worker set assumed. Pull in any extra_workers (Ruk's job-scoped
-        # "use more models if the task is hard") for THIS gap round only --
-        # normal chat callers never pass extra_workers, so this is a no-op
-        # for them (gap_workers == workers, unchanged behavior).
-        gap_workers = workers + [w for w in extra_workers if w not in workers]
+        # worker set assumed. Gap workers now come from the EXTENDED pool
+        # (healthy providers, most cap headroom first, MODELS order as
+        # tiebreak) with extra_workers pinned to the front -- so a capped or
+        # dead core provider can't starve round 2+ while 12 others sit
+        # healthy. Normal chat callers see no change when everyone's
+        # healthy: groq/gemini/cerebras have top headroom + roles anyway.
+        _pool = llm.extended_pool()
+        gap_workers = [w for w in workers if w in set(_pool)] \
+            + [w for w in extra_workers if w not in workers] \
+            + [w for w in _pool if w not in workers and w not in extra_workers]
+        if not gap_workers:
+            gap_workers = workers or [orchestrator]
         if extra_workers:
             _emit("planning", f"Task needs more help -- adding {extra_workers} to the rotation this round", round=_round + 1, provider=orchestrator)
         _emit("planning", f"Round {_round+1}: replanned with {len(next_subtasks)} gap sub-task(s)", round=_round + 1, provider=orchestrator)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(next_subtasks)) as pool:
-            gap_results = list(
-                pool.map(lambda i_s: _run_gap(str(i_s[1]), gap_workers[i_s[0] % len(gap_workers)]), enumerate(next_subtasks))
+            gap_results = orch_barrier_map(
+                pool,
+                lambda i_s: _run_gap(str(i_s[1]), gap_workers[i_s[0] % len(gap_workers)]),
+                enumerate(next_subtasks),
+                what="gap round",
+                on_event=on_event,
             )
         results.extend(gap_results)
 

@@ -21,7 +21,7 @@ live, in-process, same as before -- this module classifies them.
 import re
 
 from llm import MODELS, log
-from projects import send_whatsapp
+from notify import alert as _notify_alert
 
 _TABLE = "healing_ledger"
 
@@ -220,13 +220,12 @@ def check_for_new_failures() -> list[dict]:
 
 
 def alert_and_store(alerts: list[dict]) -> None:
-    """Sends the real WhatsApp alert (best-effort) AND inserts a real row
-    into healing_ledger -- root cause + fix, or root cause alone if
-    there's no safe auto-fix -- so a later 'haan'/'fix it' in chat can
-    apply it, and so main.py's chat pipeline can surface it even if
-    WhatsApp silently isn't configured (confirmed from Ruk's own logs it
-    currently isn't -- chat is the channel that can never silently fail
-    to reach him the way an unconfigured webhook/secret can)."""
+    """Stores each alert as a healing_ledger row (root cause + fix, or
+    root cause alone if there's no safe auto-fix) so a later
+    'haan'/'fix it' in chat can apply it, then routes the notification
+    through notify.AlertRouter (WhatsApp via Baileys sidecar; criticals
+    also phone). Severity: blocked/repeated failures are critical,
+    everything else warn."""
     import config
 
     client = config.get_client()
@@ -246,8 +245,15 @@ def alert_and_store(alerts: list[dict]) -> None:
             lines.append("Iska koi safe automatic fix nahi hai -- khud dekhna padega, ya bata kya karna hai.")
         msg = "\n".join(lines)
         log(f"[healing] {msg}")
-        if not send_whatsapp(msg):
-            log(f"[healing] WhatsApp send failed or not configured (check RUK_WHATSAPP_NUMBER/WHATSAPP_TOKEN/WHATSAPP_PHONE_NUMBER_ID in HF secrets) -- alert only reached server logs for {j['id']}, chat will still surface it")
+        severity = "critical" if a.get("critical") or diag.get("critical") else "warn"
+        receipt = _notify_alert(
+            title=f"Sandy job failure: {j.get('name', j['id'])}",
+            body=msg,
+            severity=severity,
+            meta={"job_ref": j["id"], "engine": j.get("engine", "hermes")},
+        )
+        if not receipt.get("dispatched") and not receipt.get("queued"):
+            log(f"[healing] no channel dispatched for {j['id']} -- alert reached logs only; chat will still surface it")
 
 
 def run_check_and_alert() -> list[dict]:

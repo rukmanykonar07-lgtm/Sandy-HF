@@ -32,13 +32,17 @@ import healing
 import search
 from identity import SANDY_SYSTEM_PROMPT, CAPABILITIES
 import memory
+import observability
+import projects
 import brain
 import mastery
 import native_mastery
 import events
 import selfmod
+import scraply
 import youtube
 from llm import call_llm, call_llm_with_fallback, CapExceeded, MODELS, strip_json_fence, log
+import llm
 
 @asynccontextmanager
 async def _healing_loop_lifespan(app: FastAPI):
@@ -51,6 +55,23 @@ async def _healing_loop_lifespan(app: FastAPI):
     if not os.environ.get("SANDY_AUTH_KEY"):
         log("[auth] SANDY_AUTH_KEY not set -- auth gate is OPEN; set the HF secret to lock /chat down")
     loop_task = asyncio.create_task(_heal_poll_loop())
+    # usage persistence: rehydrate today's rollups so a Space wake-up
+    # doesn't zero the morning's burn, then start the single-owner flusher.
+    try:
+        loaded = await asyncio.to_thread(observability.load_today)
+        observability.start_flusher()
+        if loaded:
+            log(f"[usage] rehydrated {loaded} sandy_usage_daily row(s) into the live counters")
+    except Exception as e:
+        log(f"[usage] boot persistence skipped (fail-open): {e!r}")
+    try:
+        projects.start_worker()  # Part 8: autonomous project execution (1 at a time)
+    except Exception as e:
+        log(f"[projects.worker] boot skipped (fail-open): {e!r}")
+    try:
+        selfmod._load_persisted_pending()  # Part 9: restore proposals that survived a restart
+    except Exception as e:
+        log(f"[selfmod] pending restore skipped (fail-open): {e!r}")
     yield
     loop_task.cancel()
 
@@ -1472,6 +1493,61 @@ def mastery_graph(run_id: str):
     except Exception as e:
         log(f"[/api/mastery-graph] failed for {run_id}: {e!r}")
         return {"events": [], "error": str(e)}
+
+
+@app.get("/api/scrape")
+def scrape(url: str, mode: str = "fast"):
+    """Direct scraply access -- fetch a URL and return LLM-ready markdown
+    (plan Part 3). Auth-gated like every /api route by AuthGateMiddleware.
+    Structured result either way; never raises. Scrapes aren't LLM calls,
+    so they're logged but never touch provider caps."""
+    try:
+        return scraply.fetch(url, mode=mode)
+    except Exception as e:  # belt-and-braces -- scraply itself is non-raising
+        log(f"[/api/scrape] failed for {url}: {e!r}")
+        return {"ok": False, "url": url, "error": str(e)}
+
+
+@app.get("/api/usage/summary")
+def usage_summary():
+    """Sandy's self-awareness view (plan Part 4) -- pure aggregation,
+    ZERO LLM calls: per-provider spend with cap status/burn rate/ETA to
+    exhaustion, per-caller drill-down ("62% chatting, 28% job X"), the
+    key audit, and each provider's context window + strengths profile.
+    This is what the command-center Models panel renders."""
+    try:
+        caps = config.get_config("caps") or {}
+        limits = llm.CONTEXT_LIMITS
+        profiles = llm.PROFILES
+        keys = llm.key_audit()
+        providers = observability.today_summary()  # {provider: {calls, tokens_in, tokens_out}}
+
+        rows = []
+        for provider in sorted(set(providers) | set(keys),
+                               key=lambda p: (
+                                   -(providers.get(p, {}).get("tokens_in", 0)
+                                     + providers.get(p, {}).get("tokens_out", 0)),
+                                   -providers.get(p, {}).get("calls", 0), p)):
+            usage = providers.get(provider, {"calls": 0, "tokens_in": 0, "tokens_out": 0})
+            detail = observability.today_summary(provider)
+            rows.append({
+                "provider": provider,
+                "calls": usage["calls"],
+                "tokens_in": usage["tokens_in"],
+                "tokens_out": usage["tokens_out"],
+                "burn_rate": round(observability.burn_rate(provider), 4),
+                "cap_status": observability.cap_status(provider),
+                "time_to_cap_exhaustion": observability.time_to_cap_exhaustion(provider),
+                "top_callers": detail.get("top_callers", []),
+                "context_limit": limits.get(provider),
+                "profile": profiles.get(provider, {}),
+                "rate_limits": llm.RATE_LIMITS.get(provider, {}),
+                "key_present": keys.get(provider, False),
+            })
+        return {"providers": rows, "generated_at": time.time()}
+    except Exception as e:
+        log(f"[/api/usage/summary] failed: {e!r}")
+        return {"providers": [], "error": str(e)}
 
 
 @app.post("/api/mastery-graph/{run_id}/explain")

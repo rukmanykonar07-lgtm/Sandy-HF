@@ -8,10 +8,11 @@ Also gives Ruk /chat visibility into edit history and rollback (git log
 """
 import ast
 import difflib
+import json
 import os
 import subprocess
 
-from llm import call_llm_with_fallback, strip_fence
+from llm import call_llm_with_fallback, strip_fence, log
 
 REPO_DIR = "/app"
 
@@ -19,6 +20,56 @@ REPO_DIR = "/app"
 # gets applied (an LLM regenerating the diff on the approval turn could
 # produce something slightly different -- this avoids that mismatch).
 _pending: dict[str, dict] = {}
+
+_PERSIST_KEY = "selfmod_pending"      # sandy_config mirror for restart durability
+_MAX_DIFF_LINES = 400                 # sanity cap: a "small edit" proposal bigger
+                                      # than this is suspicious -- reject at the gate
+
+
+def _persist_pending() -> None:
+    """Mirror _pending into sandy_config so a Space restart (which wipes
+    process memory) doesn't orphan an approved-but-unapplied edit. Best
+    effort: if Supabase blips the in-memory copy still works this boot."""
+    try:
+        import config
+        config.set_config(_PERSIST_KEY, json.dumps(_pending))
+    except Exception as e:
+        log(f"[selfmod] pending-mirror write failed (non-fatal): {e!r}")
+
+
+def _load_persisted_pending() -> None:
+    """Boot-time restore of proposals saved before a restart. Called once
+    from main's lifespan; failures leave _pending empty and non-fatal."""
+    if _pending:
+        return
+    try:
+        import config
+        raw = config.get_config(_PERSIST_KEY)
+        if raw:
+            _pending.update(json.loads(raw))
+            log(f"[selfmod] restored {len(_pending)} pending proposal(s) from sandy_config")
+    except Exception as e:
+        log(f"[selfmod] pending-mirror read failed (non-fatal): {e!r}")
+
+
+def _clear_persisted_pending() -> None:
+    try:
+        import config
+        config.delete_config(_PERSIST_KEY)
+    except Exception as e:
+        log(f"[selfmod] pending-mirror clear failed (non-fatal): {e!r}")
+
+
+def _risk_label(diff: str) -> str:
+    """Purely informational tag so Ruk can eyeball blast radius. 'high'
+    means the edit touches control flow of risky modules or is large;
+    it does NOT change the approval requirement -- every apply still
+    needs his explicit yes."""
+    n_lines = len(diff.splitlines())
+    risky_markers = ("subprocess", "os.system", "eval(", "exec(",
+                     "_run_git", "HF_WRITE_TOKEN")
+    touches_risky = any(m in diff for m in risky_markers)
+    return "high" if (touches_risky or n_lines > 100) else "low"
 
 
 class GitOpError(Exception):
@@ -163,13 +214,25 @@ def propose_edit(session_id: str, file_path: str, instruction: str) -> str:
     ))
     if not diff:
         return f"Ruk, koi actual change nahi bana {file_path} mein us instruction se."
+    if len(diff.splitlines()) > _MAX_DIFF_LINES:
+        return (
+            f"Ruk, ye proposal {_MAX_DIFF_LINES} lines se bada diff ban raha hai "
+            f"({len(diff.splitlines())}) -- itna bada 'chhota edit' galat direction "
+            "mein jaa raha hai. Instruction ko chhote steps mein tod ke try karo. "
+            "Kuch pending nahi hua."
+        )
 
     _pending[session_id] = {
         "file_path": file_path,
         "new_content": new_content,
         "commit_message": f"Sandy self-edit: {instruction[:72]}",
     }
-    return f"Proposed change to {file_path}:\n\n{diff}\n\nConfirm karoge to apply + push kar dungi."
+    _persist_pending()
+    risk = _risk_label(diff)
+    risk_note = ("(risk: high -- risky APIs ya bada diff, dhyan se padhna)"
+                 if risk == "high" else "(risk: low)")
+    return (f"Proposed change to {file_path} {risk_note}:\n\n{diff}\n\n"
+            "Confirm karoge to apply + push kar dungi.")
 
 
 def apply_pending(session_id: str) -> str:
@@ -193,6 +256,7 @@ def apply_pending(session_id: str) -> str:
     _run_git("-c", "user.email=sandy@ruks-home.local", "-c", "user.name=Sandy",
               "commit", "-m", pending["commit_message"])
     _run_git("push", "origin", "main")
+    _clear_persisted_pending()
     return f"Done, Ruk — {pending['file_path']} push ho gaya, HF rebuild ho raha hai ab."
 
 

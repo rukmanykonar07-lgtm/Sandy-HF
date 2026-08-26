@@ -22,6 +22,7 @@ personal assistant, not a fleet. Revisit if that ever changes.
 import datetime
 import logging
 import threading
+import time
 
 import config
 
@@ -31,6 +32,102 @@ _lock = threading.Lock()
 # {date_iso: {provider: {"calls": int, "tokens_in": int, "tokens_out": int,
 #                         "callers": {caller_tag: {"calls": int, "tokens_in": int, "tokens_out": int}}}}}
 _DAILY: dict = {}
+
+# --- persistence into Supabase `sandy_usage_daily` (plan Part 4) ---------
+# The in-memory rollup dies with the process -- and HF Spaces sleeps/restarts
+# constantly. So: a single flusher thread owns ALL writes (scenario #6: no
+# two threads ever race an upsert), flushing at most once per 30s and only
+# when something changed. Worst case a crash loses <=30s of rollups --
+# acceptable for a dashboard feed. Boot does the reverse: load_today()
+# rehydrates today's rows so a mid-day restart doesn't reset the counters.
+#
+# One-time setup (run once in Supabase SQL editor):
+#
+#     create table sandy_usage_daily (
+#         date text not null,
+#         provider text not null,
+#         caller text not null,
+#         calls int not null default 0,
+#         tokens_in bigint not null default 0,
+#         tokens_out bigint not null default 0,
+#         updated_at timestamptz default now(),
+#         primary key (date, provider, caller)
+#     );
+_FLUSH_INTERVAL = 30          # seconds between flush attempts
+_dirty = threading.Event()
+_flusher_started = False
+
+
+def _flush_loop():
+    while True:
+        time.sleep(_FLUSH_INTERVAL)
+        if _dirty.is_set():
+            result = flush()
+            if result.get("ok"):
+                _dirty.clear()
+
+
+def start_flusher() -> None:
+    """Idempotent boot hook -- called once from main's lifespan."""
+    global _flusher_started
+    if _flusher_started:
+        return
+    _flusher_started = True
+    threading.Thread(target=_flush_loop, daemon=True, name="usage-flusher").start()
+
+
+def flush() -> dict:
+    """Upsert today's rollup into sandy_usage_daily. One row per
+    (date, provider, caller); totals are rebuilt by summing callers.
+    Fail-open like every Supabase touch: an outage logs and retries
+    next tick, never blocks the chat path."""
+    try:
+        client = config.get_client()
+        date = _today()
+        with _lock:
+            day = _DAILY.get(date, {})
+            rows = []
+            for provider, p in day.items():
+                for caller, c in p["callers"].items():
+                    rows.append({"date": date, "provider": provider, "caller": caller,
+                                 "calls": c["calls"], "tokens_in": c["tokens_in"],
+                                 "tokens_out": c["tokens_out"]})
+        if not rows:
+            return {"ok": True, "rows": 0}
+        client.table("sandy_usage_daily").upsert(rows).execute()
+        return {"ok": True, "rows": len(rows)}
+    except Exception as e:
+        log.warning("usage flush failed (will retry next tick): %r", e)
+        return {"ok": False, "error": str(e)}
+
+
+def load_today() -> int:
+    """Boot rehydration: pull today's persisted rows back into _DAILY so
+    a Space wake-up doesn't zero the morning's burn. Returns row count;
+    any failure leaves _DAILY empty but raises nothing."""
+    try:
+        client = config.get_client()
+        date = _today()
+        res = client.table("sandy_usage_daily").select("*").eq("date", date).execute()
+        rows = res.data or []
+        with _lock:
+            day = _DAILY.setdefault(date, {})
+            for r in rows:
+                p = day.setdefault(r["provider"],
+                                   {"calls": 0, "tokens_in": 0, "tokens_out": 0, "callers": {}})
+                c = p["callers"].setdefault(r["caller"],
+                                            {"calls": 0, "tokens_in": 0, "tokens_out": 0})
+                c["calls"] += r["calls"]
+                c["tokens_in"] += r["tokens_in"]
+                c["tokens_out"] += r["tokens_out"]
+                # rebuild the provider totals from the caller rows we just loaded
+                p["calls"] += r["calls"]
+                p["tokens_in"] += r["tokens_in"]
+                p["tokens_out"] += r["tokens_out"]
+        return len(rows)
+    except Exception as e:
+        log.warning("usage load_today failed (starting empty): %r", e)
+        return 0
 
 # --- burn-rate tracking (added, ported from OmniRoute's burnRate.ts EMA
 # algorithm -- studied its src/lib/quota/burnRate.ts directly, not
@@ -178,6 +275,7 @@ def record_call(provider: str, caller: str, messages_in: list[dict], response_te
                 del _DAILY[old_key]
 
     _record_sample(provider)
+    _dirty.set()  # wake the flusher -- it owns ALL sandy_usage_daily writes
     return record
 
 

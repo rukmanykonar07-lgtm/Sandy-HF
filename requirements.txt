@@ -11,5 +11,7 @@ hermes-agent==0.18.2
 tavily-python==0.7.26
 exa_py==1.0.2
 linkup-sdk==0.1.4
+scrapling==0.4.15   # scraply's engine; [fetchers] extra = curl_cffi for TLS-impersonated fast mode; [rag] extra = markdownify for page->markdown. Browser binaries (playwright/camoufox) NOT installed -- stealth is opt-in and needs them fetched separately
+scrapling[fetchers,rag]==0.4.15
 youtube-transcript-api==1.2.4
 requests==2.33.0   # exact match to hermes-agent 0.18.2's hard pin; 2.32.x makes pip unresolvable
