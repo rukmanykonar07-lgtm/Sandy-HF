@@ -21,7 +21,7 @@ live, in-process, same as before -- this module classifies them.
 import re
 
 from llm import MODELS, log
-from notify import alert as _notify_alert
+from projects import send_whatsapp
 
 _TABLE = "healing_ledger"
 
@@ -194,24 +194,6 @@ def check_for_new_failures() -> list[dict]:
             all_jobs.append(j)
     except Exception as e:
         log(f"[healing] hermes job list read failed: {e!r}")
-        # Same honesty rule as job failures, applied to the gateway
-        # itself: don't just log -- say what broke, why, and the fix.
-        # notify's own cooldown dedups repeat polls to one ping per
-        # ALERT_COOLDOWN window.
-        _notify_alert(
-            title="Hermes gateway unreachable",
-            body=(
-                "KYA HUA: Hermes ke cron jobs ki list padh nahi payi -- "
-                "gateway process down ya crash hua lagta hai.\n"
-                f"ERROR: {e!r}\n"
-                "FIX: container logs mein gateway/supervisord section dekho "
-                "(supervisorctl status, restart gateway). Sandy ke native "
-                "jobs abhi bhi monitor ho rahe hain -- sirf Hermes-side "
-                "jobs is window mein andhi hain."
-            ),
-            severity="warn",
-            meta={"subsystem": "hermes_gateway", "error": repr(e)[:300]},
-        )
     all_jobs += native_mastery.status_shape()
 
     client = config.get_client()
@@ -238,11 +220,13 @@ def check_for_new_failures() -> list[dict]:
 
 
 def alert_and_store(alerts: list[dict]) -> None:
-    """Stores each alert as a healing_ledger row (root cause + fix, or
-    root cause alone if there's no safe auto-fix) so a later
-    'haan'/'fix it' in chat can apply it, then routes the notification
-    through notify.AlertRouter (Telegram; criticals also phone).
-    Severity: blocked/repeated failures are critical, everything else warn."""
+    """Sends the real WhatsApp alert (best-effort) AND inserts a real row
+    into healing_ledger -- root cause + fix, or root cause alone if
+    there's no safe auto-fix -- so a later 'haan'/'fix it' in chat can
+    apply it, and so main.py's chat pipeline can surface it even if
+    WhatsApp silently isn't configured (confirmed from Ruk's own logs it
+    currently isn't -- chat is the channel that can never silently fail
+    to reach him the way an unconfigured webhook/secret can)."""
     import config
 
     client = config.get_client()
@@ -262,15 +246,8 @@ def alert_and_store(alerts: list[dict]) -> None:
             lines.append("Iska koi safe automatic fix nahi hai -- khud dekhna padega, ya bata kya karna hai.")
         msg = "\n".join(lines)
         log(f"[healing] {msg}")
-        severity = "critical" if a.get("critical") or diag.get("critical") else "warn"
-        receipt = _notify_alert(
-            title=f"Sandy job failure: {j.get('name', j['id'])}",
-            body=msg,
-            severity=severity,
-            meta={"job_ref": j["id"], "engine": j.get("engine", "hermes")},
-        )
-        if not receipt.get("dispatched") and not receipt.get("queued"):
-            log(f"[healing] no channel dispatched for {j['id']} -- alert reached logs only; chat will still surface it")
+        if not send_whatsapp(msg):
+            log(f"[healing] WhatsApp send failed or not configured (check RUK_WHATSAPP_NUMBER/WHATSAPP_TOKEN/WHATSAPP_PHONE_NUMBER_ID in HF secrets) -- alert only reached server logs for {j['id']}, chat will still surface it")
 
 
 def run_check_and_alert() -> list[dict]:

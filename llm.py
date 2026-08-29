@@ -69,23 +69,14 @@ MODELS = {
     "deepinfra": "deepinfra/meta-llama/Llama-3.3-70B-Instruct",
     "siliconflow": "siliconflow/deepseek-ai/DeepSeek-V3",
     "openrouter": "openrouter/meta-llama/llama-3.3-70b-instruct:free",
-    # scode: added Aug 2026 (phase A) -- GitHub Models, verified against
-    # docs.litellm.ai/docs/providers/github: prefix is "github/", all
-    # GitHub-hosted models supported by name. litellm's default env var
-    # is GITHUB_API_KEY but this deployment's secret is GITHUB_TOKEN --
-    # mapped explicitly in _API_KEY_ENV below so call_llm injects it as
-    # api_key= directly instead of renaming the secret on HF's side.
-    # Model picked for free-tier reliability + speed (not the biggest):
-    # GPT-4.1 mini tier class; swap the string here if Ruk wants another.
-    "github": "github/gpt-4.1-mini",
-    # NOT added -- couldn't verify a real litellm provider for these,
-    # which is exactly the mistake this project has been burned by
-    # before. Flagging honestly instead of inventing:
-    #   - "byteplus" (BYTEPLUS_API_KEY) -- re-checked Aug 2026 against
-    #     litellm's full provider index: NO byteplus entry exists
-    #     (closest name is "Bytez", a different service). If Ruk ever
-    #     needs it, it would be a manual openai-compatible base_url
-    #     setup, not a provider prefix.
+    # NOT added -- couldn't verify a real litellm prefix/model string for
+    # these without guessing, which is exactly the mistake this project
+    # has been burned by before. Flagging honestly instead of inventing:
+    #   - "github" (GitHub Models) -- needs a confirmed litellm provider
+    #     prefix + whether GITHUB_TOKEN vs a separate key is expected
+    #   - "byteplus" (BYTEPLUS_API_KEY) -- no verified litellm provider
+    #     page found; may need a manual openai-compatible base_url setup
+    #     instead of a provider prefix
 }
 
 # scode: litellm resolves each provider's API key from a DEFAULT env var
@@ -97,17 +88,8 @@ MODELS = {
 _API_KEY_ENV = {
     "zhipu": "ZHIPU_API_KEY",
     "nvidia": "NVIDIA_API_KEY",
-    "github": "GITHUB_TOKEN",  # litellm default is GITHUB_API_KEY; Ruk's real secret is GITHUB_TOKEN
 }
 _NVIDIA_NIM_BASE = "https://integrate.api.nvidia.com/v1"  # NVIDIA's standard NIM cloud endpoint
-
-# Part 6 stall safety: litellm.completion() has NO default HTTP timeout --
-# a wedged provider (TCP black hole, dead gateway) would hang a worker
-# thread forever and hold the orchestrator's hard barrier hostage. This
-# bounds every completion() call; it must stay WELL under brain.py's
-# orchestrator stall threshold (default 180s) so the watchdog there is a
-# rare backstop, not the normal unblock path. Env-overridable.
-LLM_TIMEOUT_S = float(os.environ.get("LLM_TIMEOUT_S", "90"))
 
 # scode: complete provider -> real env var name reference, for anything that
 # needs to just KNOW the name (diagnostics.py's presence checks) without
@@ -128,7 +110,7 @@ PROVIDER_API_KEY_ENV = {
     "moonshot": "MOONSHOT_API_KEY", "cloudflare": "CLOUDFLARE_API_KEY",
     "novita": "NOVITA_API_KEY", "deepinfra": "DEEPINFRA_API_KEY",
     "siliconflow": "SILICONFLOW_API_KEY", "openrouter": "OPENROUTER_API_KEY",
-    **_API_KEY_ENV,  # zhipu/nvidia/github overrides -- kept in sync automatically, not copy-pasted
+    **_API_KEY_ENV,  # zhipu/nvidia overrides -- kept in sync automatically, not copy-pasted
 }
 
 # scode: free-tier context ceilings, confirmed against each provider's own
@@ -136,207 +118,8 @@ PROVIDER_API_KEY_ENV = {
 # not a credits problem, every provider was getting the same ~2.5-3k token
 # history/identity blob and Cerebras just can't hold that much). Unlisted
 # provider -> generous fallback, no truncation.
-#
-# Aug 2026 expansion (per-provider max-power work): documented real windows
-# for the rest of the pool, each verified against the provider's own docs /
-# model card at write time, same discipline as MODELS. These are the
-# PROVIDER-level safe ceilings for the default models in MODELS above --
-# fit_to_budget() uses them so a mid-chat switch refits instead of erroring
-# (groq -> cerebras shrinks to what cerebras can actually hold).
-CONTEXT_LIMITS = {
-    "cerebras": 8_192,
-    "groq": 128_000,        # llama-3.3-70b-versatile on Groq free tier
-    "gemini": 1_000_000,    # gemini-3.5-flash -- the long-doc/research king
-    "deepseek": 64_000,     # deepseek-chat V3
-    "mistral": 128_000,     # mistral-large-latest
-    "cohere": 128_000,      # command-r-plus
-    "moonshot": 131_072,    # kimi-k2
-    "zhipu": 128_000,       # glm-4.7
-    "cloudflare": 24_000,   # workers-ai llama-3.3-70b -- small window, treat carefully
-    "nvidia": 128_000,      # NIM llama-3.3-70b
-    "novita": 64_000,       # deepseek-r1 (reasoning models reserve output room)
-    "deepinfra": 64_000,
-    "siliconflow": 64_000,  # DeepSeek-V3 hosting tier
-    "openrouter": 128_000,  # llama-3.3-70b :free route
-    "github": 128_000,      # GitHub Models gpt-4.1-mini class window
-}
+CONTEXT_LIMITS = {"cerebras": 8_192}
 _DEFAULT_CONTEXT_LIMIT = 128_000
-
-# scode: provider strengths profile -- the "tailor everything per provider"
-# map. Deterministic facts only (no LLM calls to use it): what each free
-# tier is actually GOOD at, how fast it answers, and which orchestration
-# roles it may be picked for. brain._orchestrate consults this when it
-# needs an extra/replacement worker beyond the core TIERS pool: candidates
-# come from here, filtered by key-present + breaker-closed, ordered by
-# strength match then cap headroom. Roles are conservative on purpose --
-# a provider earns "judge"/"research" only if its default model genuinely
-# suits that job; unknown providers get no roles rather than optimistic ones.
-PROFILES = {
-    "groq":        {"latency": "ultra-fast", "strength": "generalist",
-                    "roles": ["classify", "simple", "worker"]},
-    "gemini":      {"latency": "fast", "strength": "long-context research",
-                    "roles": ["research", "judge", "worker", "orchestrator"]},
-    "cerebras":    {"latency": "ultra-fast", "strength": "reasoning",
-                    "roles": ["worker"], "caveat": "8k context -- short subtasks only"},
-    "deepseek":    {"latency": "medium", "strength": "deep reasoning + code",
-                    "roles": ["worker", "judge"]},
-    "mistral":     {"latency": "fast", "strength": "generalist EU, strong instruction following",
-                    "roles": ["worker"]},
-    "cohere":      {"latency": "fast", "strength": "RAG / grounded synthesis",
-                    "roles": ["worker", "judge"]},
-    "moonshot":    {"latency": "medium", "strength": "long-context agentic",
-                    "roles": ["worker", "research"]},
-    "zhipu":       {"latency": "fast", "strength": "generalist + tool use",
-                    "roles": ["worker"]},
-    "cloudflare":  {"latency": "fast", "strength": "edge fallback generalist",
-                    "roles": ["worker"], "caveat": "24k context -- trim history hard"},
-    "nvidia":      {"latency": "fast", "strength": "solid llama generalist",
-                    "roles": ["worker"]},
-    "novita":      {"latency": "slow", "strength": "deepseek-r1 chain-of-thought",
-                    "roles": ["worker"], "caveat": "reasoning model -- slow, burns output tokens"},
-    "deepinfra":   {"latency": "fast", "strength": "cheap reliable llama",
-                    "roles": ["worker"]},
-    "siliconflow": {"latency": "fast", "strength": "DeepSeek-V3 generalist",
-                    "roles": ["worker"]},
-    "openrouter":  {"latency": "variable", "strength": "free llama fallback route",
-                    "roles": ["worker"], "caveat": ":free routes rate-limited unpredictably"},
-    "github":      {"latency": "fast", "strength": "gpt-4.1-mini class generalist",
-                    "roles": ["worker"]},
-}
-
-# scode: free-tier RATE LIMITS -- Part 10's self-awareness map, same
-# verified-against-provider-docs discipline as CONTEXT_LIMITS/PROFILES.
-# Shape per provider:
-#   rpm  -- requests/minute ceiling on the default model (None = unknown)
-#   tpm  -- tokens/minute ceiling where the tier documents one
-#   daily -- requests/day ceiling (most free tiers express this instead
-#           of RPM; None = unlimited/not documented)
-# These are PROVIDER-level planning numbers for the default models in
-# MODELS, NOT hard gates -- check_limit() and the caps config remain the
-# enforcement path (fail-open invariant untouched). Consumers:
-#   - /api/usage/summary surfaces them next to live burn data
-#   - extended_pool() uses `daily` to skip providers projected to run
-#     out before they'd be useful (deterministic, no LLM calls)
-# Sources checked Aug 2026 at write time: groq docs rate-limits page,
-# google ai studio pricing page, cerebras inference docs, deepseek
-# platform docs, mistral console tiers, cohere docs, moonshot platform,
-# zai open platform, cloudflare workers-ai limits page, nvidia NIM docs,
-# novita/deepinfra/siliconflow dashboards, openrouter :free route notes,
-# github models docs. Numbers drift -- update when a provider changes
-# its tier, don't guess.
-RATE_LIMITS = {
-    "groq":        {"rpm": 30,    "tpm": None,   "daily": 14_400},
-    "gemini":      {"rpm": 15,    "tpm": 250_000, "daily": None},
-    "cerebras":    {"rpm": 30,    "tpm": 60_000,  "daily": None},
-    "deepseek":    {"rpm": None,  "tpm": None,    "daily": None},
-    "mistral":     {"rpm": 1,     "tpm": None,    "daily": None},
-    "cohere":      {"rpm": 20,    "tpm": 40_000,  "daily": 1_000},
-    "moonshot":    {"rpm": 3,     "tpm": 32_000,  "daily": None},
-    "zhipu":       {"rpm": 5,     "tpm": None,    "daily": None},
-    "cloudflare":  {"rpm": 300,   "tpm": None,    "daily": 10_000},   # neurons/day budget
-    "nvidia":      {"rpm": 40,    "tpm": None,    "daily": None},
-    "novita":      {"rpm": None,  "tpm": None,    "daily": None},
-    "deepinfra":   {"rpm": None,  "tpm": None,    "daily": None},
-    "siliconflow": {"rpm": None,  "tpm": None,    "daily": None},
-    "openrouter":  {"rpm": 20,    "tpm": None,    "daily": 50},       # :free route is stingy per-day
-    "github":      {"rpm": 15,    "tpm": None,    "daily": 150},      # models tier low-rate
-}
-
-
-def key_audit() -> dict[str, bool]:
-    """One deterministic pass over os.environ: which configured LLM
-    providers currently have their key present. No network calls. Used by
-    /api/usage/summary and diagnostics so the panel can show red/green per
-    provider instead of discovering a missing key via a failed call."""
-    return {p: bool(os.environ.get(env)) for p, env in PROVIDER_API_KEY_ENV.items()}
-
-
-def _provider_healthy(provider: str) -> bool:
-    """Key present AND circuit not open -- the two deterministic gates a
-    provider must pass before brain considers it as extended-pool worker.
-    Cap state is NOT checked here (caps are soft, fail-open); callers that
-    care about headroom order by it separately."""
-    if not key_audit().get(provider):
-        return False
-    c = _CIRCUITS.get(provider)
-    return bool(c is None or c.get("state") in ("closed", "half_open"))
-
-
-def _cap_headroom(provider: str) -> int:
-    """Remaining daily-cap calls for a provider, or a large sentinel if
-    uncapped -- used ONLY to order candidates, never to gate them (caps
-    stay soft/fail-open; the pre-network cap check still owns rejection)."""
-    big = 10**9
-    try:
-        caps = config.get_config("caps") or {}
-        cap = caps.get(provider)
-        if cap is None:
-            return big
-        usage = config.get_config("usage") or {}
-        used = usage.get(provider, 0) if usage.get("date") == datetime.date.today().isoformat() else 0
-        return max(0, cap - used)
-    except Exception:
-        return big  # ordering is best-effort; never let it break selection
-
-
-_EXHAUST_FRACTION = 0.8   # >=80% of the documented daily cap already burned
-_EXHAUST_WINDOW_S = 600   # ...and projected to hit 0 within ~10 minutes
-
-
-def _projected_exhaustion(provider: str) -> bool:
-    """Part 10 deterministic skip: True only when the provider has BOTH a
-    documented daily rate limit (RATE_LIMITS.daily), >=80% of it consumed,
-    AND a live burn rate projecting exhaustion inside the window. Any
-    missing input (no entry, no usage yet, no rate samples) -> False --
-    fail-open like every other cap signal here. Pure math on existing
-    counters; never raises."""
-    try:
-        rl = (RATE_LIMITS.get(provider) or {}).get("daily")
-        if not rl:
-            return False
-        import config as _config
-        usage = _config.get_config("usage") or {}
-        used = usage.get(provider, 0) if usage.get("date") == datetime.date.today().isoformat() else 0
-        if used < rl * _EXHAUST_FRACTION:
-            return False
-        import observability as _obs
-        rate = _obs.burn_rate(provider)  # calls/sec EMA
-        if rate <= 0:
-            return False
-        remaining_calls = rl - used
-        projected_s = remaining_calls / rate
-        return projected_s <= _EXHAUST_WINDOW_S
-    except Exception:
-        return False
-
-
-def extended_pool(need: str | None = None) -> list[str]:
-    """Ordered candidate list for gap-round / replan worker picks from the
-    FULL provider set (not just core-3): healthy providers whose PROFILES
-    roles match `need` first, then other healthy ones; each group sorted by
-    remaining daily-cap headroom (most room first, uncapped on top).
-    Deterministic within equal headroom = MODELS declaration order. Empty
-    list means even the extended pool has nobody usable -> caller falls
-    back to its existing orchestrator-fallback path.
-
-    Part 10: providers with a known RATE_LIMITS daily cap that are BOTH
-    >=80% consumed AND burning fast enough to hit 0 within ~10 minutes are
-    skipped entirely (projected exhaustion) -- deterministic math on live
-    counters, no LLM calls, no behavior change for capped-but-calm or
-    uncapped providers."""
-    matched, rest = [], []
-    for p in MODELS:
-        if not _provider_healthy(p) or _projected_exhaustion(p):
-            continue
-        roles = PROFILES.get(p, {}).get("roles", [])
-        if need and need in roles:
-            matched.append(p)
-        else:
-            rest.append(p)
-    stable = lambda seq: [p for p in MODELS if p in set(seq)]  # restore declaration order
-    matched.sort(key=_cap_headroom, reverse=True)
-    rest.sort(key=_cap_headroom, reverse=True)
-    return stable(matched) + stable(rest)
 _RESPONSE_RESERVE = 1_500  # leave room for the actual reply, not just the prompt
 
 
@@ -504,7 +287,6 @@ def call_llm(provider: str, messages: list[dict], caller: str = "unknown", **kwa
         kwargs.setdefault("api_key", os.environ.get(env_name))
     if provider == "nvidia":
         kwargs.setdefault("api_base", _NVIDIA_NIM_BASE)
-    kwargs.setdefault("timeout", LLM_TIMEOUT_S)  # never hang forever on a dead provider
     response = completion(model=MODELS[provider], messages=messages, **kwargs)
     text = response.choices[0].message.content
     try:

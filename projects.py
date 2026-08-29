@@ -35,13 +35,11 @@ the primary interface a while back) -- reused here for alerts only,
 not as a chat interface.
 """
 import os
-import time
 
 import requests
 from supabase import Client
 
 import config
-from llm import call_llm_with_fallback, strip_json_fence, log
 
 APPROVAL_GRADUATION_THRESHOLD = 3  # after this many Ruk-approved submissions on a
                                     # project, stop asking -- exactly what Ruk asked for
@@ -142,8 +140,6 @@ def check_limit(project_id: str, provider: str, used_this_project: int) -> tuple
 
 
 def _notify_limit_exhausted(project: dict, provider: str, fallback: str | None) -> None:
-    from notify import alert  # deferred import: avoids a circular import at module load
-
     msg = (
         f"Ruk, project '{project['name']}' ne {provider} ka limit khatam kar diya. "
         + (
@@ -153,8 +149,26 @@ def _notify_limit_exhausted(project: dict, provider: str, fallback: str | None) 
         )
     )
     log_event(project["id"], "alert", msg)
-    alert(title=f"Sandy project limit: {project['name']}", body=msg, severity="warn",
-          meta={"project_id": project["id"], "provider": provider})
+    send_whatsapp(msg)
+
+
+def send_whatsapp(message: str) -> bool:
+    """Best-effort -- a failed notification should never crash whatever
+    triggered it. Uses the WhatsApp Business Cloud API (Meta) -- the
+    secrets were already sitting in HF unused."""
+    try:
+        phone_id = os.environ["WHATSAPP_PHONE_NUMBER_ID"]
+        token = os.environ["WHATSAPP_TOKEN"]
+        to = os.environ["RUK_WHATSAPP_NUMBER"]
+        requests.post(
+            f"https://graph.facebook.com/v20.0/{phone_id}/messages",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": message}},
+            timeout=10,
+        )
+        return True
+    except Exception:
+        return False
 
 
 def needs_approval(project_id: str) -> bool:
@@ -175,177 +189,3 @@ def record_approved_submission(project_id: str) -> None:
     _db().table("projects").update(
         {"trusted_submissions": project.get("trusted_submissions", 0) + 1}
     ).eq("id", project_id).execute()
-
-
-# ---------------------------------------------------------------------------
-# Part 8: autonomous execution loop.
-#
-# One daemon poller (wired in main's lifespan next to the healing loop)
-# picks up status='active' projects, one at a time (free-tier politeness).
-# Each cycle: plan the next steps with a single cheap classify-style call,
-# execute them through brain.answer (which inherits MAX_ORCH_CALLS=16 and
-# the stall watchdog per step), append project_events, and stop cleanly on
-# pause/approval/limit conditions. auto_resolve tasks retry an adjusted
-# approach up to _MAX_ATTEMPTS; needs_approval tasks pause and wait for
-# Ruk in chat instead of acting unilaterally.
-
-_MAX_STEPS_PER_CYCLE = 3      # steps executed per worker pass
-_MAX_ATTEMPTS = 3             # adjusted-approach retries for auto-resolve tasks
-_POLL_SECONDS = 120           # idle poll interval; HF sleep makes this moot off-wake
-_STEP_TIMEOUT_S = float(os.environ.get("PROJECT_STEP_TIMEOUT_S", "600"))
-
-
-def _plan_steps(project: dict) -> list[str]:
-    """One cheap groq call turns the description into 2-5 concrete,
-    self-contained steps. Deterministic fallback keeps the loop alive if
-    the planner call fails or returns garbage."""
-    prompt = (
-        "Break this project into 2-5 concrete, self-contained execution steps. "
-        "Each step must be a standalone instruction Sandy can complete without "
-        "further clarification. Reply with ONLY a JSON array of strings.\n"
-        f"Project: {project['name']}\nDescription: {project.get('description') or '(none)'}"
-    )
-    try:
-        raw = call_llm_with_fallback(
-            "groq", [{"role": "user", "content": prompt}], caller="projects.plan"
-        )
-        import json
-        parsed = json.loads(strip_json_fence(raw))
-        if isinstance(parsed, list) and parsed:
-            return [str(s).strip() for s in parsed if str(s).strip()][:_MAX_STEPS_PER_CYCLE]
-    except Exception as e:
-        log(f"[projects.worker] planner call failed, using deterministic fallback: {e!r}")
-    desc = (project.get("description") or "").strip()
-    return [desc or f"Make progress on '{project['name']}'"]
-
-
-def _execute_step(project: dict, step: str) -> str:
-    """Runs one step through brain.answer (deferred import -- brain is a
-    heavy module and importing it here would drag mastery/cron deps into
-    every projects.py consumer at load time). brain.answer inherits the
-    orchestrator ceiling and stall watchdog automatically."""
-    import brain
-
-    return brain.answer(
-        task=step,
-        context=(
-            f"You are executing one step of Ruk's project '{project['name']}'. "
-            f"Project description: {project.get('description') or 'n/a'}. "
-            "Complete THIS step only; be concrete and finish with the actual result."
-        ),
-    )
-
-
-def run_cycle(project: dict) -> dict:
-    """Plans + executes one batch of steps for one active project. Returns
-    a small outcome dict for tests/logging. Never raises into the poller."""
-    outcome = {"project": project["name"], "steps_done": 0, "status": "ok"}
-    log_event(project["id"], "action", f"Worker picked up project; planning up to {_MAX_STEPS_PER_CYCLE} steps.")
-
-    steps = _plan_steps(project)
-
-    for i, step in enumerate(steps):
-        # Per-project spend check before spending (check_limit alerts on exhaustion).
-        used = len(get_events(project["id"])) // 2  # rough proxy: each prior step ~2 events
-        within, fallback = check_limit(project["id"], "groq", used)
-        if not within:
-            outcome["status"] = "paused" if not fallback else "degraded"
-            break
-
-        attempts = _MAX_ATTEMPTS if project.get("requires_approval") else _MAX_ATTEMPTS
-        last_err = None
-        result = None
-        for attempt in range(1, attempts + 1):
-            t0 = time.time()
-            try:
-                result = _execute_step(project, step)
-                break
-            except Exception as e:
-                last_err = e
-                log(f"[projects.worker] step {i + 1} attempt {attempt} failed: {e!r}")
-                log_event(project["id"], "alert",
-                          f"Step {i + 1} attempt {attempt}/{attempts} failed: {e}")
-        if result is None:
-            outcome["status"] = "failed"
-            from notify import alert  # deferred: circular-import avoidance
-            msg = (f"Project '{project['name']}' step {i + 1} failed after {attempts} attempts. "
-                   f"Last error: {last_err!r}")
-            log_event(project["id"], "alert", msg)
-            alert(title=f"Sandy project failed: {project['name']}", body=msg, severity="warn",
-                  meta={"project_id": project["id"]})
-            break
-
-        took = time.time() - t0
-        log_event(project["id"], "action", f"Step {i + 1}: {step}")
-        log_event(project["id"], "response", f"Result ({took:.0f}s):\n{result[:2000]}")
-        outcome["steps_done"] += 1
-
-        if time.time() - t0 > _STEP_TIMEOUT_S:
-            log(f"[projects.worker] step exceeded {_STEP_TIMEOUT_S:.0f}s -- stopping this cycle")
-            break
-
-    if outcome["steps_done"]:
-        log_event(project["id"], "action",
-                  f"Cycle complete: {outcome['steps_done']} step(s) done.")
-    return outcome
-
-
-def pick_next_project() -> dict | None:
-    """Oldest active project first; paused/done are skipped by the filter.
-    None = nothing eligible right now."""
-    rows = list_projects(status="active")
-    return rows[-1] if rows else None  # oldest first (list is created_at desc)
-
-
-def pause_for_approval(project: dict, reason: str) -> None:
-    """Flips the project to paused so the poller skips it until Ruk
-    resumes it in chat, and tells him why (info severity -- nothing is
-    broken, it's waiting on a human)."""
-    _db().table("projects").update({"status": "paused"}).eq("id", project["id"]).execute()
-    from notify import alert  # deferred import: circular-import avoidance
-    msg = f"Project '{project['name']}' paused -- {reason}"
-    log_event(project["id"], "alert", msg)
-    alert(title=f"Sandy project paused: {project['name']}", body=msg, severity="info",
-          meta={"project_id": project["id"]})
-
-
-def notify_completed(project: dict) -> None:
-    from notify import alert  # deferred import: circular-import avoidance
-    msg = f"Project '{project['name']}' finished all planned work."
-    log_event(project["id"], "alert", msg)
-    alert(title=f"Sandy project complete: {project['name']}", body=msg, severity="info",
-          meta={"project_id": project["id"]})
-
-
-_worker_started = False
-
-
-def start_worker() -> None:
-    """Idempotent boot hook called once from main's lifespan."""
-    global _worker_started
-    if _worker_started:
-        return
-    _worker_started = True
-    import threading
-
-    def _loop():
-        while True:
-            try:
-                project = pick_next_project()
-                if project:
-                    outcome = run_cycle(project)
-                    log(f"[projects.worker] cycle for '{outcome['project']}': "
-                        f"{outcome['steps_done']} step(s), status={outcome['status']}")
-                    if outcome["steps_done"] == 0 and outcome["status"] == "ok":
-                        # Nothing progressed two cycles in a row would spin;
-                        # a completed project should be marked done in chat --
-                        # here we just avoid hot-looping on it via the poll gap.
-                        pass
-                else:
-                    log("[projects.worker] no active projects; idling")
-            except Exception as e:
-                log(f"[projects.worker] cycle error (continuing): {e!r}")
-            time.sleep(_POLL_SECONDS)
-
-    threading.Thread(target=_loop, daemon=True, name="projects-worker").start()
-    log(f"[projects.worker] started (poll every {_POLL_SECONDS:.0f}s)")

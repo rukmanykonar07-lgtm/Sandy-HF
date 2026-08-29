@@ -31,9 +31,7 @@ _GATEWAY_ERR_LOG = "/tmp/hermes_gateway.err.log"
 _SEARCH_AND_INFRA_KEYS = (
     "SUPABASE_URL", "SUPABASE_SERVICE_KEY", "SUPABASE_KEY", "SUPABASE_DB_CONNECTION_STRING",
     "TAVILY", "EXA", "LINKUP",
-    # Alert channels (Part 7): Telegram primary instant alerts, CallMeBot
-    # optional WhatsApp fallback, Twilio critical calls.
-    "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "RUK_WHATSAPP_NUMBER",
+    "WHATSAPP_TOKEN", "WHATSAPP_PHONE_NUMBER_ID", "RUK_WHATSAPP_NUMBER",
 )
 _KNOWN_KEYS = tuple(sorted(set(PROVIDER_API_KEY_ENV.values()) | set(_SEARCH_AND_INFRA_KEYS)))
 

@@ -400,14 +400,7 @@
       </section>
 
       <!-- Placeholder views -->
-      <!-- AI Core: live per-provider usage/self-awareness view (plan Part 4) -->
-      <section class="view" id="view-ai-core">
-        <div class="panel">
-          <div class="panel-header"><h2>Models</h2><span class="count" id="aicore-count"></span></div>
-          <div class="card-sub" style="padding: 0 4px 10px">Today's token burn per provider -- where credits actually went. Click a row for its per-caller breakdown.</div>
-          <div class="grid grid-cols-3" id="aicore-grid"><div class="card-sub" style="padding:8px 4px">Loading…</div></div>
-        </div>
-      </section>
+      <section class="view" id="view-ai-core"></section>
       <section class="view" id="view-agents">
         <div class="panel">
           <div class="panel-header"><h2>Mastery Comparison</h2></div>
@@ -452,19 +445,11 @@
       <section class="view" id="view-calendar"></section>
       <section class="view" id="view-knowledge-base"></section>
 
-      <!-- Workflows (real Hermes cron jobs) + Part 5 live run timelines -->
+      <!-- Workflows (real Hermes cron jobs) -->
       <section class="view" id="view-workflows">
         <div class="panel">
           <div class="panel-header"><h2>Workflows</h2><span class="count" id="workflows-count"></span></div>
           <div id="workflows-list"></div>
-        </div>
-        <div class="panel" id="workflow-timeline-panel" style="display:none">
-          <div class="panel-header">
-            <button id="wf-back" class="nav-item" style="padding:6px 14px">&larr; All jobs</button>
-            <h2 id="workflow-timeline-title">Timeline</h2><span class="count" id="workflow-timeline-count"></span>
-          </div>
-          <div class="card-sub" style="padding:4px 4px 12px">Real events for this job's latest run, oldest first -- planning, worker calls, verification, conflicts, synthesis, output. Auto-refreshes every 5s while the run is active; stops when idle.</div>
-          <div id="workflow-timeline"></div>
         </div>
       </section>
 
@@ -551,6 +536,7 @@
   ];
 
   const PLACEHOLDER_COPY = {
+    "ai-core": "Live provider health, routing tier breakdown, and orchestrator activity will render here once wired to real telemetry.",
     "tasks": "No task-tracking system exists yet. Reserved for if/when Sandy gets a real task board.",
     "calendar": "Not connected to anything yet — reserved for a future calendar integration.",
     "knowledge-base": "Reserved for a future document/knowledge store. Nothing built here yet.",
@@ -570,7 +556,7 @@
   Object.entries(PLACEHOLDER_COPY).forEach(([id, copy]) => {
     const section = document.getElementById("view-" + id);
     const navItem = NAV.find((n) => n.id === id);
-    if (section && !id.startsWith("ai-core")) {  // ai-core has a real panel now (Part 4)
+    if (section) {
       section.innerHTML = `<div class="placeholder-view"><div class="icon">${ICONS[navItem.icon]}</div><h2>${navItem.label}</h2><p>${copy}</p></div>`;
     }
   });
@@ -581,8 +567,6 @@
     document.getElementById("view-" + id).classList.add("active");
     document.querySelector(`.nav-item[data-view="${id}"]`).classList.add("active");
     if (id === "agents") loadRunPicker();  // real data, loaded on demand not on every /status poll
-    setAiCorePolling(id === "ai-core");    // 60s usage poll only while its view is open
-    setWorkflowPolling(id === "workflows"); // Part 5: 5s timeline poll only while this view is open AND a run is active
   }
   window.sandyShowView = showView;
 
@@ -978,111 +962,17 @@
       listEl.innerHTML = `<div class="placeholder-view"><p>No workflows registered yet — try "master &lt;skill&gt; for N days" in Conversations.</p></div>`;
       return;
     }
-    listEl.innerHTML = `<div class="grid grid-cols-3">` + jobs.map((j, i) => {
+    listEl.innerHTML = `<div class="grid grid-cols-3">` + jobs.map((j) => {
       const repeat = j.repeat || {};
       const progress = repeat.times ? `${repeat.completed || 0}/${repeat.times} sessions` : "";
       const stateColor = j.state === "scheduled" ? "green" : j.state === "paused" ? "amber" : "red";
       return `
-      <div class="card" data-wf-id="${esc(j.id)}" data-wf-name="${esc(j.name || j.id)}" style="cursor:pointer" title="Click for live run timeline">
+      <div class="card">
         <div class="card-title">${j.name || j.id}<span class="badge badge-${stateColor}">${j.state || "unknown"}</span></div>
         <div class="card-sub">${j.schedule_display || ""} ${progress ? "· " + progress : ""}</div>
         ${j.last_error ? `<div class="card-sub" style="color:var(--red)">${j.last_error}</div>` : ""}
       </div>`;
     }).join("") + `</div>`;
-    listEl.querySelectorAll("[data-wf-id]").forEach((card) => {
-      card.addEventListener("click", () => openWorkflowTimeline(card.dataset.wfId, card.dataset.wfName));
-    });
-  }
-
-  // ---------- Part 5: live run timelines (Workflows view) ----------
-  // Click a job card -> latest mastery run for that job -> event timeline
-  // from /api/mastery-graph/{run_id}. Polls every 5s ONLY while this view
-  // is open and the run is still active (running/scheduled); stops when
-  // idle or when the user navigates away -- free-tier discipline.
-  const WF_POLL_MS = 5000;
-  let wfTimer = null;
-  let wfCurrentJob = null;      // { id, name }
-  let wfLastRunId = null;
-
-  // scode: run_id conventions differ per engine -- native mastery logs
-  // events under the JOB ID itself (native_mastery.log_event calls pass
-  // job_id as run_id), while hermes backfills under
-  // "hermes:{job_id}:{timestamp}" (mastery.py:341). Match both; pick the
-  // most recently started.
-  function wfRunsForJob(runs, jobId) {
-    return runs
-      .filter((r) => r.run_id === jobId || r.run_id.startsWith(`hermes:${jobId}:`))
-      .sort((a, b) => new Date(b.started_at) - new Date(a.started_at));
-  }
-
-  function setWorkflowPolling(on) {
-    clearInterval(wfTimer);
-    wfTimer = null;
-    if (on && wfCurrentJob) { loadWfTimeline(); wfTimer = setInterval(loadWfTimeline, WF_POLL_MS); }
-  }
-
-  async function openWorkflowTimeline(jobId, jobName) {
-    wfCurrentJob = { id: jobId, name: jobName || jobId };
-    document.getElementById("workflows-list").parentElement.style.display = "none";
-    document.getElementById("workflow-timeline-panel").style.display = "";
-    document.getElementById("workflow-timeline-title").textContent = wfCurrentJob.name;
-    loadWfTimeline();
-  }
-
-  document.getElementById("wf-back").addEventListener("click", () => {
-    wfCurrentJob = null;
-    document.getElementById("workflow-timeline-panel").style.display = "none";
-    document.getElementById("workflows-list").parentElement.style.display = "";
-    setWorkflowPolling(false);
-  });
-
-  async function loadWfTimeline() {
-    if (!wfCurrentJob) return;
-    const listEl = document.getElementById("workflow-timeline");
-    const countEl = document.getElementById("workflow-timeline-count");
-    try {
-      // 1. resolve the job's latest run (runs are cached per poll cycle)
-      const res = await fetch("/api/mastery-runs", { headers: authHeaders() });
-      if (!res.ok) throw new Error("runs fetch failed");
-      const runs = await res.json();
-      const run = wfRunsForJob(runs, wfCurrentJob.id)[0];   // newest-started first
-      if (!run) {
-        countEl.textContent = "";
-        listEl.innerHTML = `<div class="placeholder-view"><p>No runs recorded yet for this job. Events appear here after its first real session.</p></div>`;
-        return;
-      }
-      if (run.run_id !== wfLastRunId) {
-        wfLastRunId = run.run_id;
-        listEl.innerHTML = `<div class="card-sub">Loading events…</div>`;
-      }
-      // 2. fetch that run's full event timeline
-      const gRes = await fetch(`/api/mastery-graph/${encodeURIComponent(run.run_id)}`, { headers: authHeaders() });
-      if (!gRes.ok) throw new Error("graph fetch failed");
-      const graph = await gRes.json();
-      const evs = graph.events || [];
-      countEl.textContent = `${evs.length} events · run ${run.run_id}`;
-      listEl.innerHTML = evs.length === 0
-        ? `<div class="placeholder-view"><p>No events yet in this run.</p></div>`
-        : evs.map((e) => `
-          <div class="card" style="margin-top:8px">
-            <div class="card-title">${esc(e.event_type)}<span class="badge badge-green">R${e.round ?? 0}</span>${e.provider ? `<span class="badge badge-amber">${esc(e.provider)}</span>` : ""}</div>
-            <div class="card-sub">${esc(e.summary)}</div>
-            ${e.detail ? `<div class="card-sub" style="white-space:pre-wrap;margin-top:4px;color:var(--text-dim, #888)">${esc(String(e.detail).slice(0, 800))}</div>` : ""}
-            <div class="card-sub" style="margin-top:4px;font-size:11px">${esc(e.created_at || "")}</div>
-          </div>`).join("");
-      // 3. keep polling only while something is actually active. The graph
-      // endpoint returns events only (no state field), so activity comes
-      // solely from /status jobs: running/scheduled/scheduled_waiting count.
-      // done/paused/failed/proposed => idle, poll stops (free-tier discipline).
-      const WF_ACTIVE_STATES = new Set(["running", "scheduled", "scheduled_waiting"]);
-      const job = (lastStatus && Array.isArray(lastStatus.jobs) ? lastStatus.jobs : [])
-        .find((j) => j.id === wfCurrentJob.id);
-      const active = !!job && WF_ACTIVE_STATES.has(job.state || "");
-      if (!active && wfTimer) { clearInterval(wfTimer); wfTimer = null; countEl.textContent += " · idle"; }
-    } catch (e) {
-      console.warn("workflow timeline fetch failed", e);
-      listEl.innerHTML = `<div class="placeholder-view"><p>Couldn't load the timeline right now — check the Space logs.</p></div>`;
-    }
   }
 
   // scode: Command Center's Mastery Jobs card and the Agents tab both read
@@ -1299,86 +1189,6 @@
 
   if (ensureToken()) { loadHistory(); fetchStatus(); }
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/service-worker.js").catch(() => {});
-
-  // ---------- AI Core: Models panel (plan Part 4) ----------
-  // Reads /api/usage/summary -- pure aggregation, zero LLM calls on the
-  // backend. 60s poll, free-tier discipline: only while the view is open.
-  let aicoreTimer = null;
-  const AICORE_POLL_MS = 60000;
-
-  function esc(s) {
-    return String(s == null ? "" : s).replace(/[&<>"']/g,
-      (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-  }
-
-  function fmtTokens(n) {
-    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
-    if (n >= 1_000) return (n / 1_000).toFixed(1) + "k";
-    return String(n);
-  }
-
-  function capBadge(st) {
-    if (!st || st.state === "ok") return "";
-    const cls = st.state === "exhausted" ? "badge-red" : "badge-amber";
-    const label = st.state === "exhausted" ? "cap hit" : `warn ${Math.round((st.fraction || 0) * 100)}%`;
-    return `<span class="badge ${cls}">${label}</span>`;
-  }
-
-  async function loadAiCore() {
-    const grid = document.getElementById("aicore-grid");
-    try {
-      const res = await fetch("/api/usage/summary", { headers: authHeaders() });
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      const data = await res.json();
-      const rows = data.providers || [];
-      document.getElementById("aicore-count").textContent = rows.length + " providers";
-      if (!rows.length) {
-        grid.innerHTML = `<div class="card-sub" style="padding:8px 4px">No usage recorded yet today -- send Sandy a message and this fills in.</div>`;
-        return;
-      }
-      grid.innerHTML = rows.map((p) => {
-        const total = (p.tokens_in || 0) + (p.tokens_out || 0);
-        const cap = p.cap_status && p.cap_status.cap;
-        const used = p.cap_status && p.cap_status.used;
-        const pct = cap ? Math.min(100, (used / cap) * 100) : null;
-        const eta = p.time_to_cap_exhaustion == null ? "" :
-          (p.time_to_cap_exhaustion === 0 ? " · exhausted now"
-            : ` · ~${Math.round(p.time_to_cap_exhaustion / 60)}m to cap`);
-        const callers = (p.top_callers || []).map(([tag, c]) =>
-          `<div>${esc(tag)} <span style="color:var(--text-dim)">${fmtTokens(c.tokens_in + c.tokens_out)} tok · ${c.calls} calls</span></div>`
-        ).join("");
-        const profileBits = [];
-        if (p.profile && p.profile.strength) profileBits.push(esc(p.profile.strength));
-        if (p.profile && p.profile.latency) profileBits.push(esc(p.profile.latency));
-        if (p.context_limit) profileBits.push(`${fmtTokens(p.context_limit)} ctx`);
-        const rl = p.rate_limits || {};
-        if (rl.rpm != null) profileBits.push(`${rl.rpm} rpm`);
-        if (rl.tpm != null) profileBits.push(`${fmtTokens(rl.tpm)} tpm`);
-        if (rl.daily != null) profileBits.push(`${rl.daily}/day cap`);
-        return `<div class="card">
-          <div class="card-title">${esc(p.provider)}
-            <span style="display:flex;gap:6px;align-items:center">
-              ${p.key_present === false ? '<span class="badge badge-amber">no key</span>' : ''}
-              ${capBadge(p.cap_status)}
-            </span>
-          </div>
-          <div class="card-sub">${fmtTokens(total)} tokens today · ${p.calls} calls${eta}</div>
-          ${pct != null ? `<div class="usage-bar-track"><div class="usage-bar-fill${pct >= 90 ? " red" : pct >= 70 ? " amber" : ""}" style="width:${pct}%"></div></div>` : ""}
-          ${profileBits.length ? `<div class="card-sub">${profileBits.join(" · ")}</div>` : ""}
-          ${callers ? `<div class="card-sub" style="margin-top:6px">${callers}</div>` : ""}
-        </div>`;
-      }).join("");
-    } catch (e) {
-      grid.innerHTML = `<div class="card-sub" style="padding:8px 4px">Couldn't load usage summary (${esc(e.message)}) -- check Space logs.</div>`;
-    }
-  }
-
-  function setAiCorePolling(on) {
-    clearInterval(aicoreTimer);
-    aicoreTimer = null;
-    if (on) { loadAiCore(); aicoreTimer = setInterval(loadAiCore, AICORE_POLL_MS); }
-  }
-
 })();
 </script>
 </body>
